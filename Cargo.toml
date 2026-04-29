@@ -10,14 +10,15 @@ members = [
     "crates/recorder-plugin-example",
     "crates/recorder-sdk",
     "crates/recorder-ui",
+    "plugins/faster-whisper",
     "plugins/parakeet-unified",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.9.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/example/recorder"
+repository = "https://github.com/alantoewsio/recorder"
 
 [patch.crates-io]
 # rack-sys CMake: Windows paths must be CMake-style so add_library() does not parse \U / \c escapes.
