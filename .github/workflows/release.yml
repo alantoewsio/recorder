@@ -150,3 +150,36 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}.tar.gz
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, build-sdk]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Collect archives for release
+        shell: bash
+        run: |
+          mkdir -p upload
+          find release-assets -type f \( -name '*.zip' -o -name '*.tar.gz' \) -exec cp -t upload/ {} +
+          ls -la upload/
+
+      - name: Create GitHub Release with assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Recorder ${{ github.ref_name }}
+          generate_release_notes: true
+          files: upload/*
+          fail_on_unmatched_files: true
+          allowUpdates: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

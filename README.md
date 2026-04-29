@@ -42,7 +42,9 @@ This repo includes a GitHub Actions workflow at [`.github/workflows/release.yml`
 - `recorder-sdk-macos-x64.tar.gz`
 - `recorder-sdk-linux-x64.tar.gz`
 
-Run it manually from GitHub Actions (`Release Builds` -> `Run workflow`) or by pushing a tag that starts with `v`, for example:
+Pushing a `v*` tag (for example `v0.9.0`) runs this workflow and then **creates a [GitHub Release](https://github.com/alantoewsio/recorder/releases)** for that tag, with the zip/tar.gz files attached as downloadable assets (not only workflow artifacts).
+
+Run it manually from GitHub Actions (`Release Builds` → `Run workflow`) on a branch to build artifacts without publishing a Release. To publish from an existing tag after workflow changes, either select that tag as the run ref if GitHub offers it, or move the tag (`git push origin :refs/tags/vX.Y.Z` then re-tag and push) or publish a new patch tag.
 
 ```bash
 git tag v0.9.0
