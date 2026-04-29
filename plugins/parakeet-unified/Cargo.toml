@@ -1,0 +1,12 @@
+[package]
+name = "recorder-plugin-parakeet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Recorder AudioAnalyzer plugin for NVIDIA Parakeet Unified ASR via a local NeMo sidecar"
+
+[dependencies]
+recorder-core = { path = "../../crates/recorder-core" }
+crossbeam-channel.workspace = true
+hound = "3.5"
+serde = { version = "1", features = ["derive"] }

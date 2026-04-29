@@ -1,0 +1,13 @@
+[package]
+name = "recorder-host-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux audio capture for recorder-core (PipeWire/Pulse via cpal)"
+
+[dependencies]
+recorder-core = { workspace = true }
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = "0.17"

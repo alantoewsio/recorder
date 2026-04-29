@@ -1,0 +1,152 @@
+name: Release Builds
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            artifact: recorder-ui-windows-x64
+            binary: recorder-ui.exe
+            cargo_args: --features vst
+          - name: macos-x64
+            os: macos-latest
+            artifact: recorder-ui-macos-x64
+            binary: recorder-ui
+            cargo_args: ""
+          - name: linux-x64
+            os: ubuntu-latest
+            artifact: recorder-ui-linux-x64
+            binary: recorder-ui
+            cargo_args: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            build-essential \
+            libasound2-dev \
+            libx11-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libudev-dev
+
+      - name: Build recorder-ui release
+        shell: bash
+        run: cargo build -p recorder-ui --release ${{ matrix.cargo_args }}
+
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dist = "dist/${{ matrix.artifact }}"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "target/release/${{ matrix.binary }}" $dist/
+          if (Test-Path "target/release/libmp3lame.dll") {
+            Copy-Item "target/release/libmp3lame.dll" $dist/
+          }
+          Compress-Archive -Path "$dist/*" -DestinationPath "dist/${{ matrix.artifact }}.zip" -Force
+
+      - name: Package Unix artifact
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          dist="dist/${{ matrix.artifact }}"
+          mkdir -p "$dist"
+          cp "target/release/${{ matrix.binary }}" "$dist/"
+          tar -C dist -czf "dist/${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"
+
+      - name: Upload Windows artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.zip
+
+      - name: Upload Unix artifact
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.tar.gz
+
+  build-sdk:
+    name: Build SDK ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            artifact: recorder-sdk-windows-x64
+          - name: macos-x64
+            os: macos-latest
+            artifact: recorder-sdk-macos-x64
+          - name: linux-x64
+            os: ubuntu-latest
+            artifact: recorder-sdk-linux-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            build-essential \
+            libasound2-dev \
+            libudev-dev
+
+      - name: Build and package Windows SDK
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh scripts/build-recorder-sdk-release.ps1 -ArtifactName "${{ matrix.artifact }}"
+
+      - name: Build and package Unix SDK
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash scripts/build-recorder-sdk-release.sh --artifact-name "${{ matrix.artifact }}"
+
+      - name: Upload Windows SDK artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.zip
+
+      - name: Upload Unix SDK artifact
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.tar.gz

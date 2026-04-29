@@ -1,0 +1,12 @@
+[project]
+name = "recorder"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "hf-xet>=1.4.3",
+    "nemo-toolkit[asr]>=2.7.3",
+    "setuptools>=82.0.1",
+    "wheel>=0.47.0",
+]

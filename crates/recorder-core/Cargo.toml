@@ -1,0 +1,27 @@
+[package]
+name = "recorder-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-platform multi-source audio recording: core types, pipeline, sinks"
+
+[features]
+default = ["wav", "flac"]
+wav = ["dep:hound"]
+flac = ["dep:flacenc"]
+mp3 = ["dep:mp3lame-encoder"]
+# Two-source loopback mixer (mic + speaker) with rubato-based resampling. Off by default
+# so consumers that only do separate-file recording don't pull in rubato.
+mixer = ["dep:rubato"]
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+crossbeam-channel.workspace = true
+hound = { version = "3.5", optional = true }
+flacenc = { version = "0.5", optional = true, default-features = false }
+mp3lame-encoder = { version = "0.2", optional = true }
+rubato = { version = "0.15", optional = true }
+
+[dev-dependencies]
+hound = { version = "3.5" }

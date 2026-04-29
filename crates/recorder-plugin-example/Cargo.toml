@@ -1,0 +1,13 @@
+[package]
+name = "recorder-plugin-example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Example cdylib implementing recorder-plugin-api v1 (gain)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+recorder-plugin-api = { path = "../recorder-plugin-api" }

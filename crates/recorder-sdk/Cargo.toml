@@ -1,0 +1,28 @@
+[package]
+name = "recorder-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI SDK for embedding recorder-core in non-Rust applications"
+
+[lib]
+name = "recorder_sdk"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+default = ["wav", "flac", "mp3"]
+wav = ["recorder-core/wav"]
+flac = ["recorder-core/flac"]
+mp3 = ["recorder-core/mp3"]
+
+[dependencies]
+recorder-core = { path = "../recorder-core", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+recorder-host-windows = { path = "../recorder-host-windows" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+recorder-host-macos = { path = "../recorder-host-macos" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+recorder-host-linux = { path = "../recorder-host-linux" }

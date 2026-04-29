@@ -1,0 +1,25 @@
+[package]
+name = "recorder-host-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "macOS Core Audio capture for recorder-core (via cpal); optional ScreenCaptureKit-backed system-audio loopback on macOS 13+"
+
+[features]
+# ScreenCaptureKit-backed system-audio loopback. Enabled by default on macOS so callers
+# get loopback support out of the box; gracefully no-ops on macOS < 13 at runtime.
+default = ["screencapturekit"]
+screencapturekit = ["dep:screencapturekit", "dep:objc2", "dep:objc2-foundation"]
+
+[dependencies]
+recorder-core = { workspace = true }
+tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cpal = "0.17"
+# Use screencapturekit 1.x for system-audio loopback on macOS 13+. Earlier macOS versions
+# either have no SCK or no SCK audio support; the runtime probe falls back to virtual
+# loopback drivers (BlackHole, etc.) or a "no loopback source" UI hint.
+screencapturekit = { version = "1", optional = true }
+objc2 = { version = "0.5", optional = true }
+objc2-foundation = { version = "0.2", optional = true }

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/recorder-core",
+    "crates/recorder-plugin-api",
+    "crates/recorder-host-windows",
+    "crates/recorder-host-macos",
+    "crates/recorder-host-linux",
+    "crates/recorder",
+    "crates/recorder-plugin-example",
+    "crates/recorder-sdk",
+    "crates/recorder-ui",
+    "plugins/parakeet-unified",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/example/recorder"
+
+[patch.crates-io]
+# rack-sys CMake: Windows paths must be CMake-style so add_library() does not parse \U / \c escapes.
+rack = { path = "vendor/rack" }
+# vst-rs 0.4.0 rejects any plugin whose `effGetVstVersion` returns < 2400, which excludes
+# many real-world VST 2.4 plugins (Cockos ReaPlugs, etc.) that simply don't bother
+# implementing that opcode. Vendored copy relaxes the check; see vendor/vst-rs/src/host.rs.
+vst = { path = "vendor/vst-rs" }
+
+[workspace.dependencies]
+recorder-core = { path = "crates/recorder-core" }
+recorder-plugin-api = { path = "crates/recorder-plugin-api" }
+thiserror = "2"
+tracing = "0.1"
+crossbeam-channel = "0.5"

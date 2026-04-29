@@ -1,0 +1,44 @@
+[package]
+name = "recorder-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal egui demo for recorder-core (device pick, WAV/FLAC/MP3, pause/stop, playback). On Windows, optional VST2/VST3 via recorder's reusable VST host."
+build = "build.rs"
+
+[features]
+default = []
+# VST scan/chain/audio/native editor support lives in the root `recorder` library.
+vst = ["dep:recorder", "recorder/vst"]
+
+[[bin]]
+name = "recorder-ui"
+path = "src/main.rs"
+
+[dependencies]
+crossbeam-channel = { workspace = true }
+recorder-core = { path = "../recorder-core", features = ["wav", "flac", "mp3", "mixer"] }
+recorder-plugin-parakeet = { path = "../../plugins/parakeet-unified" }
+recorder = { path = "../recorder", optional = true }
+eframe = { version = "0.29", default-features = true, features = ["wgpu", "persistence"] }
+serde = { version = "1", features = ["derive"] }
+rodio = { version = "0.19", default-features = false, features = [
+    "symphonia-wav",
+    "symphonia-flac",
+    "symphonia-mp3",
+] }
+
+[target.'cfg(windows)'.dependencies]
+recorder-host-windows = { path = "../recorder-host-windows" }
+raw-window-handle = "0.6"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+recorder-host-macos = { path = "../recorder-host-macos" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+recorder-host-linux = { path = "../recorder-host-linux" }
