@@ -1,0 +1,69 @@
+[package]
+name = "rack"
+version = "0.4.8"
+edition = "2021"
+authors = ["Giovanni <giovanni@fragcolor.com>"]
+license = "MIT OR Apache-2.0"
+description = "A modern Rust library for hosting audio plugins"
+repository = "https://github.com/sinkingsugar/rack"
+readme = "README.md"
+keywords = ["audio", "plugin", "vst", "audiounit", "host"]
+categories = ["multimedia::audio"]
+exclude = [
+    "rack-sys/external/vst3sdk/",
+    ".github/",
+    "TODO.md",
+    "CLAUDE.md",
+    "rack/CLAUDE.md",
+    "rack-sys/CLAUDE.md",
+]
+
+[dependencies]
+smallvec = "1.13"
+thiserror = "2.0"
+cpal = { version = "0.15", optional = true }
+
+[build-dependencies]
+cmake = "0.1"
+
+[dev-dependencies]
+
+[features]
+default = []
+cpal = ["dep:cpal"]
+# VST3 feature for examples - actual VST3 support depends on SDK availability at build time
+vst3 = []
+
+[[example]]
+name = "list_plugins"
+path = "examples/list_plugins.rs"
+
+[[example]]
+name = "load_plugin"
+path = "examples/load_plugin.rs"
+
+[[example]]
+name = "process_audio"
+path = "examples/process_audio.rs"
+
+[[example]]
+name = "cpal_host"
+path = "examples/cpal_host.rs"
+required-features = ["cpal"]
+
+[[example]]
+name = "list_vst3_plugins"
+path = "examples/list_vst3_plugins.rs"
+required-features = ["vst3"]
+
+[[example]]
+name = "vst3_processor"
+path = "examples/vst3_processor.rs"
+required-features = ["vst3"]
+
+[profile.dev]
+opt-level = 2  # Audio needs some optimization even in debug
+
+[profile.release]
+lto = true
+codegen-units = 1

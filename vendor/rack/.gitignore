@@ -1,0 +1,13 @@
+# Rust build artifacts
+/target
+Cargo.lock
+
+# CMake build artifacts
+rack-sys/build/
+
+# macOS
+.DS_Store
+
+# Temp files
+.restructure_note
+.vscode
