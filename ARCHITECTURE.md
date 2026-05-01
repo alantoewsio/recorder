@@ -63,9 +63,9 @@ flowchart LR
 
 Each `recorder-host-*` crate implements `AudioHost` for that OS. The current implementation uses **cpal**, which maps to WASAPI (Windows), Core Audio (macOS), and ALSA/Pulse/Jack depending on Linux configuration.
 
-### Capture sources: microphones and speaker loopback
+### Capture sources: microphones, speaker loopback, and app output
 
-Hosts expose a unified [`CaptureSource`](crates/recorder-core/src/traits.rs) list combining microphone-style **inputs** and speaker-output **loopback** sources via:
+Hosts expose a unified [`CaptureSource`](crates/recorder-core/src/traits.rs) list combining microphone-style **inputs**, speaker-output **loopback** sources, and optional per-process **app-output** sources via:
 
 - `AudioHost::list_capture_sources()` – every source the host can open.
 - `AudioHost::start_capture(source_id, kind, format, on_buffer)` – open either kind.
@@ -79,6 +79,14 @@ Per-OS loopback support:
 | Windows | **WASAPI loopback** on each render endpoint | Implemented by calling `cpal::Device::build_input_stream` on an output device (cpal sets `AUDCLNT_STREAMFLAGS_LOOPBACK`). DirectSound, WaveOut, and Dummy backends report `RecordingError::Config("loopback capture is only supported by WASAPI…")`. |
 | Linux | **PulseAudio / PipeWire monitor sources** | Devices whose name ends in `.monitor` or contains `Monitor of …` are classified `CaptureSourceKind::Loopback`; capture goes through the standard input-stream path. |
 | macOS | **ScreenCaptureKit (macOS 13+)** + virtual loopback drivers | The `screencapturekit` feature on `recorder-host-macos` (default-on) injects a synthetic `scl:system-audio` source. On older macOS or when SCK is unavailable, BlackHole / Loopback / Soundflower / VB-Cable are recognized by name as loopback. |
+
+Per-OS app-output support:
+
+| OS | App-output path | Notes |
+|----|-----------------|-------|
+| Windows | **WASAPI process loopback** | `CaptureSourceKind::AppOutput` and per-app metadata are part of the core contract. The Windows host is the first intended concrete backend, using process-bound loopback rather than endpoint loopback. |
+| Linux | **PipeWire route to recorder-owned virtual sink** | Contract is modeled in `recorder-core`, but the routing helper is still a future backend. The intended design is one capture leg per selected app stream, mixed above the host layer. |
+| macOS | **ScreenCaptureKit app capture** | Contract is modeled in `recorder-core`, but the per-app backend is still future work. The existing SCK integration currently exposes whole-system audio as loopback only. |
 
 ### Mixed-mode output
 
@@ -101,7 +109,7 @@ A soft-knee limiter on sum paths protects against clipping.
 
 ### C SDK note
 
-[`recorder-sdk`](crates/recorder-sdk/src/lib.rs) still exposes the original mic ± loopback `RecorderStartConfig`. A future **v2** entry point may accept a serialized mixer graph once the Rust `MixerGraph` API is stable; new fields on the C struct will remain trailing and zero-initialized for compatibility.
+[`recorder-sdk`](crates/recorder-sdk/src/lib.rs) still exposes the original mic ± loopback `RecorderStartConfig`. `recorder_sdk_list_capture_sources_json` now also surfaces `kind="app-output"` plus per-app metadata for future callers, but starting app-output capture still needs a later C ABI revision. A future **v2** entry point may accept a serialized mixer graph once the Rust `MixerGraph` API is stable; new fields on the C struct will remain trailing and zero-initialized for compatibility.
 
 ## Plugins
 

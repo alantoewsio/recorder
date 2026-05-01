@@ -1,0 +1,12 @@
+[package]
+name = "recorder-plugin-faster-whisper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Recorder AudioAnalyzer plugin for faster-whisper via a local Python sidecar"
+
+[dependencies]
+recorder-core = { path = "../../crates/recorder-core" }
+crossbeam-channel.workspace = true
+hound = "3.5"
+serde = { version = "1", features = ["derive"] }

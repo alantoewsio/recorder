@@ -31,6 +31,16 @@ Per-OS loopback support:
 
 The UI shows a **● Speaker output is being recorded** indicator while a loopback stream is live, and an inline reminder under the source picker that loopback captures everything the system is rendering — including conference calls and notifications. Recording with anyone else in earshot is your responsibility; mention it before you start, and check local recording-consent laws.
 
+### App-output sources
+
+`list_capture_sources()` and `recorder_sdk_list_capture_sources_json()` now reserve a first-class `app-output` source kind for audio rendered by a specific running app instance. Each such source can carry backend metadata such as process id, app id, instance id, backend name, and whether callers may multi-select several app instances and mix them above the host layer.
+
+The core/source-model work is in place, but the concrete host backends are not all implemented yet. Today:
+
+- Windows still exposes whole-device loopback in the shipped host crate; the intended next backend is WASAPI process loopback.
+- macOS still exposes whole-system audio via ScreenCaptureKit loopback or virtual drivers; per-app ScreenCaptureKit capture is future work.
+- Linux still exposes monitor-loopback sources; PipeWire virtual-sink routing for app output is future work.
+
 ## Release Builds
 
 This repo includes a GitHub Actions workflow at [`.github/workflows/release.yml`](.github/workflows/release.yml) that builds native release artifacts on the correct operating system runners:
@@ -42,13 +52,13 @@ This repo includes a GitHub Actions workflow at [`.github/workflows/release.yml`
 - `recorder-sdk-macos-x64.tar.gz`
 - `recorder-sdk-linux-x64.tar.gz`
 
-Pushing a `v*` tag (for example `v0.9.0`) runs this workflow and then **creates a [GitHub Release](https://github.com/alantoewsio/recorder/releases)** for that tag, with the zip/tar.gz files attached as downloadable assets (not only workflow artifacts).
+Pushing a `v*` tag (for example `v0.9.1`) runs this workflow and then **creates a [GitHub Release](https://github.com/alantoewsio/recorder/releases)** for that tag, with the zip/tar.gz files attached as downloadable assets (not only workflow artifacts).
 
 Run it manually from GitHub Actions (`Release Builds` → `Run workflow`) on a branch to build artifacts without publishing a Release. To publish from an existing tag after workflow changes, either select that tag as the run ref if GitHub offers it, or move the tag (`git push origin :refs/tags/vX.Y.Z` then re-tag and push) or publish a new patch tag.
 
 ```bash
-git tag v0.9.0
-git push origin v0.9.0
+git tag v0.9.1
+git push origin v0.9.1
 ```
 
 The Windows artifact is built with `--features vst` and includes `recorder-ui.exe` plus `libmp3lame.dll` when present in `target/release`. macOS and Linux artifacts build the portable UI without the Windows-only VST feature.
@@ -147,7 +157,7 @@ recorder_sdk_capture_free(capture);
 free(json);
 ```
 
-To also record speaker output, enumerate every capture source (inputs **and** loopback) with `recorder_sdk_list_capture_sources_json`, pick a loopback entry, and set the loopback fields on `RecorderStartConfig`:
+To also record speaker output, enumerate every capture source (inputs, loopback, and future app-output entries) with `recorder_sdk_list_capture_sources_json`, pick a loopback entry, and set the loopback fields on `RecorderStartConfig`:
 
 ```c
 RecorderStartConfig cfg = {0};

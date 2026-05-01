@@ -57,6 +57,7 @@ pub fn synthetic_source() -> CaptureSource {
             RSample::F32,
         )),
         kind: CaptureSourceKind::Loopback,
+        app: None,
     }
 }
 
@@ -100,9 +101,7 @@ impl SCStreamOutputTrait for AudioHandler {
             }
         }
         let format = AudioFormat::new(self.sample_rate, channels, RSample::F32);
-        let frame_index = self
-            .frame_index
-            .fetch_add(frames as u64, Ordering::Relaxed);
+        let frame_index = self.frame_index.fetch_add(frames as u64, Ordering::Relaxed);
         let buf = RAudioBuffer::new(
             format,
             Arc::from(interleaved.into_boxed_slice()),
@@ -136,9 +135,9 @@ pub fn start(on_buffer: Arc<dyn Fn(RAudioBuffer) + Send + Sync>) -> Result<Strea
         ))
     })?;
     let displays = content.displays();
-    let display = displays.first().ok_or_else(|| {
-        RecordingError::Device("ScreenCaptureKit reported no displays".into())
-    })?;
+    let display = displays
+        .first()
+        .ok_or_else(|| RecordingError::Device("ScreenCaptureKit reported no displays".into()))?;
 
     let filter = SCContentFilter::create()
         .with_display(display)

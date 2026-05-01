@@ -31,7 +31,7 @@ pub struct MixerGraph {
 }
 
 impl MixerGraph {
-/// Spawn independent buses in declaration order.
+    /// Spawn independent buses in declaration order.
     pub fn spawn_from_bus_specs(
         capacity: usize,
         specs: Vec<(BusMixerConfig, Box<dyn AudioSink>)>,

@@ -183,9 +183,7 @@ impl BusMixer {
                 }
             })
             .map_err(|e| RecordingError::Config(format!("bus mixer thread spawn: {e}")))?;
-        Ok(Self {
-            join: Some(join),
-        })
+        Ok(Self { join: Some(join) })
     }
 
     pub fn stop(mut self) {
@@ -421,12 +419,7 @@ fn run_bus_thread(
             blocks.push(legs[i].pop_frames(frames));
         }
 
-        let mixed = mix_n_blocks(
-            &blocks,
-            &config.legs,
-            config.mix_mode,
-            frames,
-        );
+        let mixed = mix_n_blocks(&blocks, &config.legs, config.mix_mode, frames);
         let out_format = config.output_format();
         let captured_at = frame_index_anchor + frame_duration(output_frame_index, target_rate);
         let mut buf = AudioBuffer::new(
@@ -439,7 +432,12 @@ fn run_bus_thread(
         output_frame_index += frames as u64;
 
         if !post_chain.is_empty() {
-            buf = run_processor_chain(buf, &mut post_chain, budget.as_ref().copied(), &metrics_owned);
+            buf = run_processor_chain(
+                buf,
+                &mut post_chain,
+                budget.as_ref().copied(),
+                &metrics_owned,
+            );
         }
 
         out_sink.write_pcm_f32(&buf)?;
@@ -680,7 +678,11 @@ mod tests {
             !buffers.is_empty(),
             "expected mic-only mix while speaker has not produced yet"
         );
-        assert!((buffers[0].data[0] - 0.1).abs() < 1e-3, "got {}", buffers[0].data[0]);
+        assert!(
+            (buffers[0].data[0] - 0.1).abs() < 1e-3,
+            "got {}",
+            buffers[0].data[0]
+        );
     }
 
     #[test]
@@ -863,7 +865,10 @@ mod tests {
 
         let buffers = captured.lock().unwrap().clone();
         assert!(!buffers.is_empty());
-        assert!((buffers[0].data[0] - 0.2).abs() < 1e-2, "got {}", buffers[0].data[0]);
+        assert!(
+            (buffers[0].data[0] - 0.2).abs() < 1e-2,
+            "got {}",
+            buffers[0].data[0]
+        );
     }
-
 }

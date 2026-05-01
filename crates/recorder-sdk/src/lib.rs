@@ -11,8 +11,8 @@ use std::path::Path;
 use std::ptr;
 
 use recorder_core::{
-    AudioFormat, AudioHost, AudioSink, CaptureSourceKind, CaptureStream, RecordingError,
-    RecordingSession, SampleFormat, SessionConfig, StreamOptions,
+    AppCaptureBackend, AudioFormat, AudioHost, AudioSink, CaptureSourceKind, CaptureStream,
+    RecordingError, RecordingSession, SampleFormat, SessionConfig, StreamOptions,
 };
 
 pub const RECORDER_SDK_OK: c_int = 0;
@@ -133,6 +133,15 @@ fn sample_format_label(sample_format: SampleFormat) -> &'static str {
     }
 }
 
+fn app_capture_backend_label(backend: AppCaptureBackend) -> &'static str {
+    match backend {
+        AppCaptureBackend::WindowsProcessLoopback => "windows-process-loopback",
+        AppCaptureBackend::MacosScreenCaptureKit => "macos-screencapturekit",
+        AppCaptureBackend::LinuxPipewireRoute => "linux-pipewire-route",
+        AppCaptureBackend::Unsupported => "unsupported",
+    }
+}
+
 #[cfg(windows)]
 fn make_host(
     audio_system: Option<&str>,
@@ -219,6 +228,7 @@ fn capture_sources_json(host: &dyn AudioHost) -> recorder_core::Result<String> {
         let kind = match source.kind {
             CaptureSourceKind::Input => "input",
             CaptureSourceKind::Loopback => "loopback",
+            CaptureSourceKind::AppOutput => "app-output",
         };
         out.push_str("{\"id\":\"");
         out.push_str(&json_escape(&source.id));
@@ -234,6 +244,50 @@ fn capture_sources_json(host: &dyn AudioHost) -> recorder_core::Result<String> {
                 format.channels,
                 sample_format_label(format.sample_format)
             ));
+        } else {
+            out.push_str("null");
+        }
+        out.push_str(",\"app\":");
+        if let Some(app) = source.app.as_ref() {
+            out.push_str("{\"backend\":\"");
+            out.push_str(app_capture_backend_label(app.backend));
+            out.push_str("\",\"app_name\":\"");
+            out.push_str(&json_escape(&app.app_name));
+            out.push_str("\",\"app_id\":");
+            if let Some(app_id) = app.app_id.as_ref() {
+                out.push('"');
+                out.push_str(&json_escape(app_id));
+                out.push('"');
+            } else {
+                out.push_str("null");
+            }
+            out.push_str(",\"process_id\":");
+            if let Some(process_id) = app.process_id {
+                out.push_str(&process_id.to_string());
+            } else {
+                out.push_str("null");
+            }
+            out.push_str(",\"instance_id\":");
+            if let Some(instance_id) = app.instance_id.as_ref() {
+                out.push('"');
+                out.push_str(&json_escape(instance_id));
+                out.push('"');
+            } else {
+                out.push_str("null");
+            }
+            out.push_str(",\"supports_multi_select\":");
+            out.push_str(if app.supports_multi_select {
+                "true"
+            } else {
+                "false"
+            });
+            out.push_str(",\"requires_system_permission\":");
+            out.push_str(if app.requires_system_permission {
+                "true"
+            } else {
+                "false"
+            });
+            out.push('}');
         } else {
             out.push_str("null");
         }
@@ -440,9 +494,10 @@ fn start_recording_inner(config: &RecorderStartConfig) -> Result<*mut RecorderCa
 
     let mut captures = vec![mic_capture];
 
-    if let (Some(src_id), Some(out_path)) =
-        (loopback_source_id.as_deref(), loopback_output_path.as_deref())
-    {
+    if let (Some(src_id), Some(out_path)) = (
+        loopback_source_id.as_deref(),
+        loopback_output_path.as_deref(),
+    ) {
         let sources = host.list_capture_sources().map_err(|e| {
             set_last_error(e.to_string());
             RECORDER_SDK_ERROR
@@ -457,9 +512,11 @@ fn start_recording_inner(config: &RecorderStartConfig) -> Result<*mut RecorderCa
                 }
                 RECORDER_SDK_INVALID_ARGUMENT
             })?;
-        let loopback_format = loopback_source
-            .default_format
-            .unwrap_or(AudioFormat::new(48_000, 2, SampleFormat::F32));
+        let loopback_format = loopback_source.default_format.unwrap_or(AudioFormat::new(
+            48_000,
+            2,
+            SampleFormat::F32,
+        ));
         let loopback_sink = match build_sink(out_path, &output_format, loopback_format) {
             Ok(sink) => sink,
             Err(e) => {
@@ -545,9 +602,9 @@ pub extern "C" fn recorder_sdk_list_devices_json(
     write_json_to_caller_buffer(json, out_json, out_json_len, required_len_out)
 }
 
-/// Enumerates every capture source (microphone inputs and speaker-output loopback sources)
-/// as JSON. Each entry carries an additional `"kind"` field that is either `"input"` or
-/// `"loopback"`.
+/// Enumerates every capture source (microphone inputs, speaker-output loopback sources,
+/// and optional app-output sources) as JSON. Each entry carries a `"kind"` field and
+/// optional `"app"` metadata for app-bound sources.
 ///
 /// Buffer-size protocol matches `recorder_sdk_list_devices_json`.
 #[no_mangle]
@@ -659,10 +716,64 @@ pub extern "C" fn recorder_sdk_capture_free(capture: *mut RecorderCapture) {
 
 #[cfg(test)]
 mod tests {
-    use super::json_escape;
+    use recorder_core::{
+        AppCaptureBackend, AppCaptureDescriptor, AudioFormat, CaptureSource, SampleFormat,
+    };
+
+    use super::{capture_sources_json, json_escape, AudioHost, CaptureSourceKind};
+
+    struct FakeHost {
+        sources: Vec<CaptureSource>,
+    }
+
+    impl AudioHost for FakeHost {
+        fn list_input_devices(&self) -> recorder_core::Result<Vec<recorder_core::DeviceInfo>> {
+            Ok(vec![])
+        }
+
+        fn start_input_stream(
+            &self,
+            _device_id: Option<&str>,
+            _format: AudioFormat,
+            _on_buffer: std::sync::Arc<dyn Fn(recorder_core::AudioBuffer) + Send + Sync>,
+        ) -> recorder_core::Result<recorder_core::StreamHandle> {
+            unreachable!("not needed for json tests")
+        }
+
+        fn list_capture_sources(&self) -> recorder_core::Result<Vec<CaptureSource>> {
+            Ok(self.sources.clone())
+        }
+    }
 
     #[test]
     fn json_escape_handles_common_special_chars() {
         assert_eq!(json_escape("a\"b\\c\n"), "a\\\"b\\\\c\\n");
+    }
+
+    #[test]
+    fn capture_sources_json_includes_app_output_metadata() {
+        let host = FakeHost {
+            sources: vec![CaptureSource {
+                id: "app:42".into(),
+                name: "Music Player".into(),
+                default_format: Some(AudioFormat::new(48_000, 2, SampleFormat::F32)),
+                kind: CaptureSourceKind::AppOutput,
+                app: Some(AppCaptureDescriptor {
+                    backend: AppCaptureBackend::WindowsProcessLoopback,
+                    app_name: "Music Player".into(),
+                    app_id: Some("com.example.player".into()),
+                    process_id: Some(42),
+                    instance_id: Some("session-42".into()),
+                    supports_multi_select: true,
+                    requires_system_permission: false,
+                }),
+            }],
+        };
+
+        let json = capture_sources_json(&host).expect("json");
+        assert!(json.contains("\"kind\":\"app-output\""));
+        assert!(json.contains("\"backend\":\"windows-process-loopback\""));
+        assert!(json.contains("\"process_id\":42"));
+        assert!(json.contains("\"supports_multi_select\":true"));
     }
 }

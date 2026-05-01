@@ -173,11 +173,12 @@ use recorder_core::traits::{AudioAnalyzer, AudioHost, AudioProcessor, AudioSink}
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 use recorder_core::{
     media_event_queue, spawn_single_bus_mixer, AudioBuffer, BusMixer, BusMixerConfig,
-    CaptureSource, CaptureSourceKind,
-    CaptureStream, DeviceInfo, FlacSink, MediaEvent, MediaEventReceiver, MediaEventSender,
-    MixMode, MixerConfig, Mp3Sink, RecordingSession, SessionConfig,
-    StreamOptions, VoiceActivityAnalyzer, WavSink,
+    CaptureSource, CaptureSourceKind, CaptureStream, DeviceInfo, FlacSink, MediaEvent,
+    MediaEventReceiver, MediaEventSender, MixMode, MixerConfig, Mp3Sink, RecordingSession,
+    SessionConfig, StreamOptions, VoiceActivityAnalyzer, WavSink,
 };
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+use recorder_plugin_faster_whisper as faster_whisper_plugin;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 use recorder_plugin_parakeet as parakeet_plugin;
 
@@ -328,6 +329,9 @@ struct PersistedSettings {
     /// Parakeet NeMo sidecar settings (`None` = use env + built-in defaults on first launch).
     #[serde(default)]
     parakeet: Option<parakeet_plugin::ParakeetConfig>,
+    /// Faster-Whisper sidecar settings (`None` = use env + built-in defaults on first launch).
+    #[serde(default)]
+    faster_whisper: Option<faster_whisper_plugin::FasterWhisperConfig>,
 }
 
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
@@ -357,6 +361,7 @@ impl Default for PersistedSettings {
             speaker_mode: None,
             selected_speaker_source_id: None,
             parakeet: None,
+            faster_whisper: None,
         }
     }
 }
@@ -529,6 +534,15 @@ fn default_local_analyzers() -> Vec<LocalAnalyzerSelection> {
     }];
 
     for descriptor in parakeet_plugin::descriptors() {
+        plugins.push(LocalAnalyzerSelection {
+            id: descriptor.id.to_string(),
+            name: descriptor.name.to_string(),
+            description: descriptor.description.to_string(),
+            enabled: false,
+        });
+    }
+
+    for descriptor in faster_whisper_plugin::descriptors() {
         plugins.push(LocalAnalyzerSelection {
             id: descriptor.id.to_string(),
             name: descriptor.name.to_string(),
@@ -897,6 +911,7 @@ struct LiveFingerprint {
     live_enabled: bool,
     local_analyzer_sig: String,
     parakeet_sig: String,
+    faster_whisper_sig: String,
     #[cfg(all(windows, feature = "vst"))]
     vst_ch1_sig: String,
     #[cfg(all(windows, feature = "vst"))]
@@ -944,6 +959,8 @@ struct RecorderApp {
     device_index: Option<usize>,
     /// Loopback (speaker output) capture sources, populated from `list_capture_sources`.
     speaker_sources: Vec<CaptureSource>,
+    /// App-output capture sources, populated from `list_capture_sources`.
+    app_sources: Vec<CaptureSource>,
     speaker_index: Option<usize>,
     speaker_mode: SpeakerMode,
     path: String,
@@ -987,6 +1004,11 @@ struct RecorderApp {
     /// Editable copy while the properties window is open.
     parakeet_props_draft: parakeet_plugin::ParakeetConfig,
     parakeet_props_open: bool,
+    /// Active Faster-Whisper analyzer configuration (persisted).
+    faster_whisper_config: faster_whisper_plugin::FasterWhisperConfig,
+    /// Editable copy while the properties window is open.
+    faster_whisper_props_draft: faster_whisper_plugin::FasterWhisperConfig,
+    faster_whisper_props_open: bool,
     live_input: Option<LiveInputState>,
     #[cfg(all(windows, feature = "vst"))]
     vst: vst::VstUiState,
@@ -1020,8 +1042,13 @@ impl RecorderApp {
             })
             .collect();
         let speaker_sources: Vec<CaptureSource> = all_sources
-            .into_iter()
+            .iter()
             .filter(|s| s.kind == CaptureSourceKind::Loopback)
+            .cloned()
+            .collect();
+        let app_sources: Vec<CaptureSource> = all_sources
+            .into_iter()
+            .filter(|s| s.kind == CaptureSourceKind::AppOutput)
             .collect();
         let device_index = settings
             .selected_device_id
@@ -1070,6 +1097,11 @@ impl RecorderApp {
             .clone()
             .unwrap_or_else(parakeet_plugin::ParakeetConfig::default);
         let parakeet_props_draft = parakeet_config.clone();
+        let faster_whisper_config = settings
+            .faster_whisper
+            .clone()
+            .unwrap_or_else(faster_whisper_plugin::FasterWhisperConfig::default);
+        let faster_whisper_props_draft = faster_whisper_config.clone();
         let mut app = Self {
             #[cfg(windows)]
             audio_system,
@@ -1077,6 +1109,7 @@ impl RecorderApp {
             devices,
             device_index,
             speaker_sources,
+            app_sources,
             speaker_index,
             speaker_mode,
             path: settings.path,
@@ -1113,6 +1146,9 @@ impl RecorderApp {
             parakeet_config,
             parakeet_props_draft,
             parakeet_props_open: false,
+            faster_whisper_config,
+            faster_whisper_props_draft,
+            faster_whisper_props_open: false,
             live_input: None,
             #[cfg(all(windows, feature = "vst"))]
             vst: vst::VstUiState::default(),
@@ -1222,6 +1258,7 @@ impl RecorderApp {
                 }
             },
             parakeet: Some(self.parakeet_config.clone()),
+            faster_whisper: Some(self.faster_whisper_config.clone()),
         }
     }
 
@@ -1283,10 +1320,12 @@ impl RecorderApp {
         Some((src, af))
     }
 
-    fn compute_live_fingerprint(&self, ch1_device_id: &str, ch1_format: AudioFormat) -> LiveFingerprint {
-        let ch2 = self
-            .selected_loopback_pair()
-            .map(|(s, f)| (s.id, f));
+    fn compute_live_fingerprint(
+        &self,
+        ch1_device_id: &str,
+        ch1_format: AudioFormat,
+    ) -> LiveFingerprint {
+        let ch2 = self.selected_loopback_pair().map(|(s, f)| (s.id, f));
         LiveFingerprint {
             ch1_device: ch1_device_id.to_string(),
             ch1_format,
@@ -1305,6 +1344,7 @@ impl RecorderApp {
                 .collect::<Vec<_>>()
                 .join(","),
             parakeet_sig: format!("{:?}", self.parakeet_config),
+            faster_whisper_sig: format!("{:?}", self.faster_whisper_config),
             #[cfg(all(windows, feature = "vst"))]
             vst_ch1_sig: self
                 .vst
@@ -1359,8 +1399,9 @@ impl RecorderApp {
             not(all(windows, feature = "vst")),
             allow(unused_mut, unused_variables)
         )]
-        let mut processors: Vec<Box<dyn AudioProcessor + Send>> =
-            vec![Box::new(ChannelMapProcessor::new(self.channel2_input_channel))];
+        let mut processors: Vec<Box<dyn AudioProcessor + Send>> = vec![Box::new(
+            ChannelMapProcessor::new(self.channel2_input_channel),
+        )];
         processors.push(Box::new(MeterProcessor::new(self.meter_ch2.clone())));
         if (self.channel2_gain - 1.0).abs() > f32::EPSILON {
             processors.push(Box::new(DemoGainProcessor::new(self.channel2_gain)));
@@ -1389,6 +1430,12 @@ impl RecorderApp {
                 id if id == parakeet_plugin::PARAKEET_PLUGIN_ID => analyzers.push(
                     parakeet_plugin::create_analyzer_with_config(id, self.parakeet_config.clone())?,
                 ),
+                id if id == faster_whisper_plugin::FASTER_WHISPER_PLUGIN_ID => {
+                    analyzers.push(faster_whisper_plugin::create_analyzer_with_config(
+                        id,
+                        self.faster_whisper_config.clone(),
+                    )?)
+                }
                 id => {
                     return Err(format!("unknown local analyzer plugin: {id}"));
                 }
@@ -1565,11 +1612,8 @@ impl RecorderApp {
         };
 
         let (main_tx, main_rx) = crossbeam_channel::bounded::<AudioBuffer>(64);
-        let main_analyzer = spawn_main_analyzer_worker(
-            main_rx,
-            analyzers,
-            Some(self.event_tx.clone()),
-        );
+        let main_analyzer =
+            spawn_main_analyzer_worker(main_rx, analyzers, Some(self.event_tx.clone()));
 
         let cfg = MixerConfig {
             mode: mix_mode,
@@ -1670,11 +1714,9 @@ impl RecorderApp {
     }
 
     fn refresh_devices(&mut self) {
-        let prev_speaker_id = self.speaker_index.and_then(|i| {
-            self.speaker_sources
-                .get(i)
-                .map(|s| s.id.clone())
-        });
+        let prev_speaker_id = self
+            .speaker_index
+            .and_then(|i| self.speaker_sources.get(i).map(|s| s.id.clone()));
         match self.host.list_capture_sources() {
             Ok(list) => {
                 self.devices = list
@@ -1687,8 +1729,13 @@ impl RecorderApp {
                     })
                     .collect();
                 self.speaker_sources = list
-                    .into_iter()
+                    .iter()
                     .filter(|s| s.kind == CaptureSourceKind::Loopback)
+                    .cloned()
+                    .collect();
+                self.app_sources = list
+                    .into_iter()
+                    .filter(|s| s.kind == CaptureSourceKind::AppOutput)
                     .collect();
                 self.device_index = if self.devices.is_empty() {
                     None
@@ -1704,16 +1751,13 @@ impl RecorderApp {
                 } else {
                     prev_speaker_id
                         .as_ref()
-                        .and_then(|id| {
-                            self.speaker_sources
-                                .iter()
-                                .position(|s| &s.id == id)
-                        })
+                        .and_then(|id| self.speaker_sources.iter().position(|s| &s.id == id))
                 };
                 self.status = format!(
-                    "Found {} input device(s) and {} loopback source(s).",
+                    "Found {} input device(s), {} loopback source(s), and {} app-output source(s).",
                     self.devices.len(),
-                    self.speaker_sources.len()
+                    self.speaker_sources.len(),
+                    self.app_sources.len()
                 );
             }
             Err(e) => {
@@ -1721,6 +1765,7 @@ impl RecorderApp {
                 self.devices.clear();
                 self.device_index = None;
                 self.speaker_sources.clear();
+                self.app_sources.clear();
                 self.speaker_index = None;
             }
         }
@@ -1868,8 +1913,8 @@ impl RecorderApp {
             None
         };
 
-        let ch2_pre_path =
-            (ch2_active && self.record_pre).then(|| marked_output_path(&self.path, "_ch2_pre", self.format));
+        let ch2_pre_path = (ch2_active && self.record_pre)
+            .then(|| marked_output_path(&self.path, "_ch2_pre", self.format));
 
         let main_post_path = if ch2_active && self.record_post {
             Some(marked_output_path(&self.path, "_main_post", self.format))
@@ -1904,20 +1949,19 @@ impl RecorderApp {
             None
         };
 
-        let ch2_raw_sink: Option<Box<dyn AudioSink>> =
-            if let Some(p) = ch2_pre_path.as_ref() {
-                let saf = speaker.as_ref().unwrap().1;
-                match build_sink(p, self.format, saf) {
-                    Ok(s) => Some(s),
-                    Err(e) => {
-                        self.status = format!("Could not open channel 2 pre output: {e}");
-                        self.restart_live_input_stream();
-                        return;
-                    }
+        let ch2_raw_sink: Option<Box<dyn AudioSink>> = if let Some(p) = ch2_pre_path.as_ref() {
+            let saf = speaker.as_ref().unwrap().1;
+            match build_sink(p, self.format, saf) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    self.status = format!("Could not open channel 2 pre output: {e}");
+                    self.restart_live_input_stream();
+                    return;
                 }
-            } else {
-                None
-            };
+            }
+        } else {
+            None
+        };
 
         let paused = Arc::new(AtomicBool::new(false));
 
@@ -2152,8 +2196,7 @@ impl RecorderApp {
                     "Stopped. Ch1 pre: {ch1_pre}  Ch2 pre: {ch2_pre}  Main post: {main_post}"
                 );
             } else {
-                self.status =
-                    format!("Stopped. Pre: {ch1_pre}  Post: {main_post}");
+                self.status = format!("Stopped. Pre: {ch1_pre}  Post: {main_post}");
             }
             self.restart_live_input_stream();
         }
@@ -2404,56 +2447,54 @@ impl RecorderApp {
         egui::Window::new(title)
             .open(&mut open)
             .resizable(true)
-            .show(ctx, |ui| {
-                match self.plugin_picker_target {
-                    PluginPickerTarget::MainInternal => {
-                        ui.label("Built-in analyzers on the Main bus");
-                        for (i, plugin) in self.local_analyzers.iter().enumerate() {
-                            let suffix = if plugin.enabled { " (in chain)" } else { "" };
-                            if ui
-                                .selectable_label(false, format!("{}{}", plugin.name, suffix))
-                                .on_hover_text(&plugin.description)
-                                .clicked()
-                            {
-                                picked_internal = Some(i);
-                            }
-                        }
-                    }
-                    #[cfg(all(windows, feature = "vst"))]
-                    PluginPickerTarget::Ch1Vst | PluginPickerTarget::Ch2Vst => {
-                        if self.vst.catalog.is_empty()
-                            && self.vst.scan_error.is_none()
-                            && self.vst.scan_summary.is_none()
+            .show(ctx, |ui| match self.plugin_picker_target {
+                PluginPickerTarget::MainInternal => {
+                    ui.label("Built-in analyzers on the Main bus");
+                    for (i, plugin) in self.local_analyzers.iter().enumerate() {
+                        let suffix = if plugin.enabled { " (in chain)" } else { "" };
+                        if ui
+                            .selectable_label(false, format!("{}{}", plugin.name, suffix))
+                            .on_hover_text(&plugin.description)
+                            .clicked()
                         {
-                            self.vst.scan_catalog();
+                            picked_internal = Some(i);
                         }
-                        ui.label(self.vst.scan_summary.clone().unwrap_or_else(|| {
-                            "Scanning known VST locations on first open.".to_string()
-                        }));
-                        if let Some(err) = &self.vst.scan_error {
-                            ui.colored_label(egui::Color32::RED, err);
-                        }
-                        egui::ScrollArea::vertical()
-                            .id_salt("channel_strip_plugin_picker")
-                            .max_height(260.0)
-                            .show(ui, |ui| {
-                                for (i, plugin) in self.vst.catalog.iter().enumerate() {
-                                    let label =
-                                        format!("[{}] {}", plugin.format_label(), plugin.name());
-                                    if ui
-                                        .selectable_label(false, label)
-                                        .on_hover_text(plugin.path().display().to_string())
-                                        .clicked()
-                                    {
-                                        picked_vst = Some(i);
-                                    }
+                    }
+                }
+                #[cfg(all(windows, feature = "vst"))]
+                PluginPickerTarget::Ch1Vst | PluginPickerTarget::Ch2Vst => {
+                    if self.vst.catalog.is_empty()
+                        && self.vst.scan_error.is_none()
+                        && self.vst.scan_summary.is_none()
+                    {
+                        self.vst.scan_catalog();
+                    }
+                    ui.label(self.vst.scan_summary.clone().unwrap_or_else(|| {
+                        "Scanning known VST locations on first open.".to_string()
+                    }));
+                    if let Some(err) = &self.vst.scan_error {
+                        ui.colored_label(egui::Color32::RED, err);
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("channel_strip_plugin_picker")
+                        .max_height(260.0)
+                        .show(ui, |ui| {
+                            for (i, plugin) in self.vst.catalog.iter().enumerate() {
+                                let label =
+                                    format!("[{}] {}", plugin.format_label(), plugin.name());
+                                if ui
+                                    .selectable_label(false, label)
+                                    .on_hover_text(plugin.path().display().to_string())
+                                    .clicked()
+                                {
+                                    picked_vst = Some(i);
                                 }
-                            });
-                    }
-                    #[cfg(not(all(windows, feature = "vst")))]
-                    PluginPickerTarget::Ch1Vst | PluginPickerTarget::Ch2Vst => {
-                        ui.label("VST: rebuild with --features vst.");
-                    }
+                            }
+                        });
+                }
+                #[cfg(not(all(windows, feature = "vst")))]
+                PluginPickerTarget::Ch1Vst | PluginPickerTarget::Ch2Vst => {
+                    ui.label("VST: rebuild with --features vst.");
                 }
             });
         self.plugin_picker_open = open;
@@ -2611,9 +2652,213 @@ impl RecorderApp {
         self.parakeet_props_open = open;
     }
 
+    /// Faster-Whisper sidecar tuning: model/device/task/transcript mode and chunking.
+    fn draw_faster_whisper_properties_window(&mut self, ctx: &egui::Context) {
+        if !self.faster_whisper_props_open {
+            return;
+        }
+        let mut open = self.faster_whisper_props_open;
+        egui::Window::new("Faster-Whisper properties")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(480.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    "faster-whisper sidecar settings. Apply saves the config, restarts the live analyzer stream, and uses the selected model/device on the next chunk.",
+                );
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Model:");
+                    egui::ComboBox::from_id_salt("faster_whisper_model")
+                        .selected_text(self.faster_whisper_props_draft.model.label())
+                        .show_ui(ui, |ui| {
+                            for model in faster_whisper_plugin::ModelChoice::ALL {
+                                ui.selectable_value(
+                                    &mut self.faster_whisper_props_draft.model,
+                                    model,
+                                    model.label(),
+                                );
+                            }
+                        });
+                });
+                ui.small("Missing models are downloaded automatically by the worker when needed.");
+
+                ui.horizontal(|ui| {
+                    ui.label("Device:");
+                    egui::ComboBox::from_id_salt("faster_whisper_device_mode")
+                        .selected_text(self.faster_whisper_props_draft.device_mode.label())
+                        .show_ui(ui, |ui| {
+                            for mode in faster_whisper_plugin::DeviceMode::ALL {
+                                ui.selectable_value(
+                                    &mut self.faster_whisper_props_draft.device_mode,
+                                    mode,
+                                    mode.label(),
+                                );
+                            }
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Transcript mode:");
+                    egui::ComboBox::from_id_salt("faster_whisper_transcript_mode")
+                        .selected_text(self.faster_whisper_props_draft.transcript_mode.label())
+                        .show_ui(ui, |ui| {
+                            for mode in faster_whisper_plugin::TranscriptMode::ALL {
+                                ui.selectable_value(
+                                    &mut self.faster_whisper_props_draft.transcript_mode,
+                                    mode,
+                                    mode.label(),
+                                );
+                            }
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Task:");
+                    egui::ComboBox::from_id_salt("faster_whisper_task_mode")
+                        .selected_text(self.faster_whisper_props_draft.task_mode.label())
+                        .show_ui(ui, |ui| {
+                            for mode in faster_whisper_plugin::TaskMode::ALL {
+                                ui.selectable_value(
+                                    &mut self.faster_whisper_props_draft.task_mode,
+                                    mode,
+                                    mode.label(),
+                                );
+                            }
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Chunk length (s):");
+                    ui.add(
+                        egui::DragValue::new(&mut self.faster_whisper_props_draft.chunk_seconds)
+                            .speed(0.05)
+                            .range(0.25..=60.0),
+                    );
+                });
+                ui.small("Smaller chunks reduce latency; larger chunks often improve sentence stability.");
+
+                ui.horizontal(|ui| {
+                    ui.label("Pre-ready buffer (s):");
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut self.faster_whisper_props_draft.pre_ready_buffer_seconds,
+                        )
+                        .speed(0.25)
+                        .range(0.5..=30.0),
+                    );
+                });
+                ui.small("Recent audio kept while the worker loads or downloads the selected model.");
+
+                ui.horizontal(|ui| {
+                    ui.label("Silence RMS threshold:");
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut self.faster_whisper_props_draft.silence_rms_threshold,
+                        )
+                        .speed(0.0005)
+                        .range(0.0..=1.0),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Beam size:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.faster_whisper_props_draft.beam_size)
+                            .speed(0.1)
+                            .range(1..=10),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Sample rate (Hz):");
+                    ui.add(
+                        egui::DragValue::new(&mut self.faster_whisper_props_draft.sample_rate_hz)
+                            .speed(500)
+                            .range(8000..=48_000),
+                    );
+                });
+                ui.small("Whisper is optimized for 16 kHz mono input; leave at 16000 unless you have a reason to change it.");
+
+                ui.checkbox(
+                    &mut self.faster_whisper_props_draft.vad_filter,
+                    "Enable faster-whisper VAD filter",
+                );
+
+                ui.horizontal(|ui| {
+                    ui.label("Python:");
+                    ui.text_edit_singleline(&mut self.faster_whisper_props_draft.python);
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Worker script:");
+                    let mut path_str = self
+                        .faster_whisper_props_draft
+                        .worker_script
+                        .display()
+                        .to_string();
+                    if ui.text_edit_singleline(&mut path_str).changed() {
+                        self.faster_whisper_props_draft.worker_script = PathBuf::from(path_str);
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Model cache dir:");
+                    let mut path_str = self
+                        .faster_whisper_props_draft
+                        .model_cache_dir
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default();
+                    if ui.text_edit_singleline(&mut path_str).changed() {
+                        self.faster_whisper_props_draft.model_cache_dir =
+                            if path_str.trim().is_empty() {
+                                None
+                            } else {
+                                Some(PathBuf::from(path_str))
+                            };
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Stream id:");
+                    let mut sid = self
+                        .faster_whisper_props_draft
+                        .stream_id
+                        .clone()
+                        .unwrap_or_default();
+                    if ui.text_edit_singleline(&mut sid).changed() {
+                        self.faster_whisper_props_draft.stream_id = if sid.is_empty() {
+                            None
+                        } else {
+                            Some(sid)
+                        };
+                    }
+                });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Reset to defaults").clicked() {
+                        self.faster_whisper_props_draft =
+                            faster_whisper_plugin::FasterWhisperConfig::default();
+                    }
+                    if ui.button("Apply").clicked() {
+                        self.faster_whisper_config = self.faster_whisper_props_draft.clone();
+                        self.status = "Faster-Whisper settings applied.".to_string();
+                        self.analysis_events.clear();
+                        self.transcript_lines.clear();
+                        self.restart_live_input_stream();
+                    }
+                });
+            });
+        self.faster_whisper_props_open = open;
+    }
+
     fn draw_channel_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.draw_plugin_picker(ctx);
         self.draw_parakeet_properties_window(ctx);
+        self.draw_faster_whisper_properties_window(ctx);
 
         egui::Frame::none()
             .fill(egui::Color32::from_rgb(30, 32, 32))
@@ -3083,8 +3328,10 @@ impl RecorderApp {
                                             }
                                             let hover = if plugin.id
                                                 == parakeet_plugin::PARAKEET_PLUGIN_ID
+                                                || plugin.id
+                                                    == faster_whisper_plugin::FASTER_WHISPER_PLUGIN_ID
                                             {
-                                                "Click: Parakeet settings · Alt+click: remove"
+                                                "Click: settings · Alt+click: remove"
                                             } else {
                                                 "Alt+click: remove"
                                             };
@@ -3258,11 +3505,14 @@ impl RecorderApp {
                             if plugin.id == parakeet_plugin::PARAKEET_PLUGIN_ID {
                                 self.parakeet_props_draft = self.parakeet_config.clone();
                                 self.parakeet_props_open = true;
+                            } else if plugin.id == faster_whisper_plugin::FASTER_WHISPER_PLUGIN_ID
+                            {
+                                self.faster_whisper_props_draft =
+                                    self.faster_whisper_config.clone();
+                                self.faster_whisper_props_open = true;
                             } else {
-                                self.status = format!(
-                                    "{} has no properties panel (only Parakeet does today).",
-                                    plugin.name
-                                );
+                                self.status =
+                                    format!("{} has no properties panel.", plugin.name);
                             }
                         }
                     }
@@ -3476,7 +3726,7 @@ impl RecorderApp {
                     });
                     if self.local_analyzers.iter().any(|plugin| plugin.enabled) {
                         ui.label(if self.live_input.is_some() || self.recording.is_some() {
-                            "Analyzer stream is active. Parakeet may take a while to load before the first transcript."
+                            "Analyzer stream is active. Local transcription models may take a while to load or download before the first transcript."
                         } else {
                             "Analyzer selected, but no stream is active. Turn LIVE on or start recording."
                         });

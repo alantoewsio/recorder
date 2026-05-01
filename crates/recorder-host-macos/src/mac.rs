@@ -205,6 +205,7 @@ impl AudioHost for MacosHost {
                     name: d.name,
                     default_format: d.default_format,
                     kind,
+                    app: None,
                 }
             })
             .collect();
@@ -231,6 +232,11 @@ impl AudioHost for MacosHost {
         {
             let _ = format; // SCK uses its negotiated 48 kHz / 2-ch mix.
             return crate::screen_capture::start(on_buffer);
+        }
+        if matches!(kind, CaptureSourceKind::AppOutput) {
+            return Err(RecordingError::Config(
+                "app-output capture is not implemented for the macOS host yet".into(),
+            ));
         }
         // Otherwise virtual loopback drivers (BlackHole, Loopback, Soundflower, VB-Cable)
         // appear as ordinary input devices to Core Audio, so loopback capture goes

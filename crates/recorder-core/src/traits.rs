@@ -44,6 +44,37 @@ pub enum CaptureSourceKind {
     /// endpoint (Windows WASAPI loopback, PulseAudio/PipeWire `*.monitor`,
     /// BlackHole-style virtual devices on macOS, ScreenCaptureKit on macOS 13+).
     Loopback,
+    /// Audio rendered by a specific running application instance.
+    AppOutput,
+}
+
+/// Backend implementation used for app-output capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AppCaptureBackend {
+    WindowsProcessLoopback,
+    MacosScreenCaptureKit,
+    LinuxPipewireRoute,
+    Unsupported,
+}
+
+/// Extra metadata for a running app-output capture source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppCaptureDescriptor {
+    /// Stable backend identifier used by callers for UX and diagnostics.
+    pub backend: AppCaptureBackend,
+    /// Human-readable app name.
+    pub app_name: String,
+    /// Executable or bundle identifier when known.
+    pub app_id: Option<String>,
+    /// OS process identifier for this running instance when known.
+    pub process_id: Option<u32>,
+    /// Backend-defined live instance identifier (session serial, running-app id, etc.).
+    pub instance_id: Option<String>,
+    /// Whether the backend can mix several app-output sources in the caller by opening
+    /// several independent capture legs.
+    pub supports_multi_select: bool,
+    /// Whether the backend may require an extra user-granted system permission.
+    pub requires_system_permission: bool,
 }
 
 /// Describes one capture source (microphone or speaker loopback) exposed by a host crate.
@@ -53,6 +84,7 @@ pub struct CaptureSource {
     pub name: String,
     pub default_format: Option<AudioFormat>,
     pub kind: CaptureSourceKind,
+    pub app: Option<AppCaptureDescriptor>,
 }
 
 impl From<DeviceInfo> for CaptureSource {
@@ -62,6 +94,7 @@ impl From<DeviceInfo> for CaptureSource {
             name: d.name,
             default_format: d.default_format,
             kind: CaptureSourceKind::Input,
+            app: None,
         }
     }
 }
@@ -86,8 +119,9 @@ pub trait AudioHost: Send + Sync {
         on_buffer: Arc<dyn Fn(AudioBuffer) + Send + Sync>,
     ) -> Result<StreamHandle>;
 
-    /// Lists every capture source the host can open, including microphone-style inputs and
-    /// any loopback (system-audio) sources it can capture from.
+    /// Lists every capture source the host can open, including microphone-style inputs,
+    /// any loopback (system-audio) sources it can capture from, and optional
+    /// app-output sources for specific running application instances.
     ///
     /// The default implementation reports only [`CaptureSourceKind::Input`] entries
     /// derived from [`AudioHost::list_input_devices`]; per-OS hosts override this to add
@@ -101,7 +135,7 @@ pub trait AudioHost: Send + Sync {
             .collect())
     }
 
-    /// Opens a capture stream for any kind of source (microphone or loopback).
+    /// Opens a capture stream for any kind of source (microphone, loopback, or app output).
     ///
     /// The default implementation delegates microphone capture to
     /// [`AudioHost::start_input_stream`] and rejects loopback requests; per-OS hosts
@@ -117,6 +151,9 @@ pub trait AudioHost: Send + Sync {
             CaptureSourceKind::Input => self.start_input_stream(source_id, format, on_buffer),
             CaptureSourceKind::Loopback => Err(RecordingError::Config(
                 "loopback capture is not supported by this audio host".into(),
+            )),
+            CaptureSourceKind::AppOutput => Err(RecordingError::Config(
+                "app-output capture is not supported by this audio host".into(),
             )),
         }
     }
@@ -204,6 +241,22 @@ mod tests {
             Err(RecordingError::Config(msg)) => assert!(msg.contains("loopback")),
             Err(other) => panic!("expected Config error, got {other:?}"),
             Ok(_) => panic!("expected default loopback to error"),
+        }
+    }
+
+    #[test]
+    fn default_start_capture_rejects_app_output() {
+        let on_buffer: Arc<dyn Fn(AudioBuffer) + Send + Sync> = Arc::new(|_| {});
+        let result = InputOnlyHost.start_capture(
+            None,
+            CaptureSourceKind::AppOutput,
+            AudioFormat::new(48_000, 2, crate::format::SampleFormat::F32),
+            on_buffer,
+        );
+        match result {
+            Err(RecordingError::Config(msg)) => assert!(msg.contains("app-output")),
+            Err(other) => panic!("expected Config error, got {other:?}"),
+            Ok(_) => panic!("expected default app-output to error"),
         }
     }
 }

@@ -40,8 +40,8 @@ pub use pipeline::{GainProcessor, PipelineConfig, SpinProcessor, StreamPipeline}
 pub use session::{CaptureStream, RecordingSession, SessionConfig, StreamOptions};
 pub use synthetic::SyntheticSource;
 pub use traits::{
-    AudioHost, AudioProcessor, AudioSink, CaptureSource, CaptureSourceKind, DeviceInfo,
-    StreamHandle,
+    AppCaptureBackend, AppCaptureDescriptor, AudioHost, AudioProcessor, AudioSink, CaptureSource,
+    CaptureSourceKind, DeviceInfo, StreamHandle,
 };
 
 #[cfg(feature = "flac")]

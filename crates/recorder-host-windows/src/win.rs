@@ -88,6 +88,7 @@ impl AudioHost for WindowsHost {
                     name: d.name,
                     default_format: d.default_format,
                     kind: CaptureSourceKind::Loopback,
+                    app: None,
                 });
             }
         }
@@ -113,6 +114,9 @@ impl AudioHost for WindowsHost {
                     other.label()
                 ))),
             },
+            CaptureSourceKind::AppOutput => Err(RecordingError::Config(
+                "app-output capture is not implemented for the Windows host yet".into(),
+            )),
         }
     }
 

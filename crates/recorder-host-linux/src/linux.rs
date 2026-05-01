@@ -28,9 +28,7 @@ impl Default for LinuxHost {
 /// each output sink; cpal lists them alongside hardware inputs. Use this heuristic to
 /// classify them.
 fn is_monitor_source(name: &str) -> bool {
-    name.ends_with(".monitor")
-        || name.contains("Monitor of ")
-        || name.contains("monitor of ")
+    name.ends_with(".monitor") || name.contains("Monitor of ") || name.contains("monitor of ")
 }
 
 impl LinuxHost {
@@ -220,6 +218,7 @@ impl AudioHost for LinuxHost {
                     name: d.name,
                     default_format: d.default_format,
                     kind,
+                    app: None,
                 }
             })
             .collect())
@@ -234,6 +233,11 @@ impl AudioHost for LinuxHost {
         format: AudioFormat,
         on_buffer: Arc<dyn Fn(AudioBuffer) + Send + Sync>,
     ) -> Result<StreamHandle> {
+        if matches!(_kind, CaptureSourceKind::AppOutput) {
+            return Err(RecordingError::Config(
+                "app-output capture is not implemented for the Linux host yet".into(),
+            ));
+        }
         self.start_input_stream(source_id, format, on_buffer)
     }
 }
@@ -244,9 +248,13 @@ mod tests {
 
     #[test]
     fn monitor_heuristic_matches_pulse_pipewire_names() {
-        assert!(is_monitor_source("alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"));
+        assert!(is_monitor_source(
+            "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"
+        ));
         assert!(is_monitor_source("Monitor of Built-in Audio Analog Stereo"));
-        assert!(!is_monitor_source("alsa_input.pci-0000_00_1f.3.analog-stereo"));
+        assert!(!is_monitor_source(
+            "alsa_input.pci-0000_00_1f.3.analog-stereo"
+        ));
         assert!(!is_monitor_source("Built-in Microphone"));
     }
 }
