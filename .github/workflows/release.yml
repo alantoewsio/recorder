@@ -23,7 +23,7 @@ jobs:
             binary: recorder-ui.exe
             cargo_args: --features vst
           - name: macos-x64
-            os: macos-latest
+            os: macos-13
             artifact: recorder-ui-macos-x64
             binary: recorder-ui
             cargo_args: ""
@@ -106,7 +106,7 @@ jobs:
             os: windows-latest
             artifact: recorder-sdk-windows-x64
           - name: macos-x64
-            os: macos-latest
+            os: macos-13
             artifact: recorder-sdk-macos-x64
           - name: linux-x64
             os: ubuntu-latest

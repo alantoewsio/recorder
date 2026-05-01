@@ -145,8 +145,8 @@ pub fn start(on_buffer: Arc<dyn Fn(RAudioBuffer) + Send + Sync>) -> Result<Strea
         .build();
     let config = SCStreamConfiguration::new()
         .with_captures_audio(true)
-        .with_sample_rate(TARGET_SAMPLE_RATE as i64)
-        .with_channel_count(TARGET_CHANNELS as u32);
+        .with_sample_rate(TARGET_SAMPLE_RATE as i32)
+        .with_channel_count(TARGET_CHANNELS as i32);
 
     let mut stream = SCStream::new(&filter, &config);
     let handler = AudioHandler {

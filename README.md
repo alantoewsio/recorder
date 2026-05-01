@@ -52,13 +52,13 @@ This repo includes a GitHub Actions workflow at [`.github/workflows/release.yml`
 - `recorder-sdk-macos-x64.tar.gz`
 - `recorder-sdk-linux-x64.tar.gz`
 
-Pushing a `v*` tag (for example `v0.9.2`) runs this workflow and then **creates a [GitHub Release](https://github.com/alantoewsio/recorder/releases)** for that tag, with the zip/tar.gz files attached as downloadable assets (not only workflow artifacts).
+Pushing a `v*` tag (for example `v0.9.3`) runs this workflow and then **creates a [GitHub Release](https://github.com/alantoewsio/recorder/releases)** for that tag, with the zip/tar.gz files attached as downloadable assets (not only workflow artifacts).
 
 Run it manually from GitHub Actions (`Release Builds` → `Run workflow`) on a branch to build artifacts without publishing a Release. To publish from an existing tag after workflow changes, either select that tag as the run ref if GitHub offers it, or move the tag (`git push origin :refs/tags/vX.Y.Z` then re-tag and push) or publish a new patch tag.
 
 ```bash
-git tag v0.9.2
-git push origin v0.9.2
+git tag v0.9.3
+git push origin v0.9.3
 ```
 
 The Windows artifact is built with `--features vst` and includes `recorder-ui.exe` plus `libmp3lame.dll` when present in `target/release`. macOS and Linux artifacts build the portable UI without the Windows-only VST feature.
