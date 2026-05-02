@@ -6,4 +6,8 @@
 #[cfg(all(windows, feature = "vst"))]
 pub mod vst;
 
+#[cfg(all(target_os = "macos", feature = "vst"))]
+#[path = "vst_macos.rs"]
+pub mod vst;
+
 pub use recorder_core::*;

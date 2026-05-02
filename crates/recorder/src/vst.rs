@@ -221,6 +221,13 @@ impl ScanReport {
 
 /// Walk every search directory and probe each one for both VST3 and VST2 plugins.
 pub fn scan_all_plugins_with_report() -> std::result::Result<ScanReport, String> {
+    scan_plugin_roots_with_report(vst_search_directories())
+}
+
+/// Walk the provided search directories and probe each one for both VST3 and VST2 plugins.
+pub fn scan_plugin_roots_with_report(
+    roots: impl IntoIterator<Item = PathBuf>,
+) -> std::result::Result<ScanReport, String> {
     let scanner = Vst3Scanner::new().map_err(|e| format!("{e:?}"))?;
     let mut seen_vst3: HashSet<(PathBuf, String)> = HashSet::new();
     let mut seen_vst2: HashSet<(PathBuf, i32)> = HashSet::new();
@@ -230,7 +237,7 @@ pub fn scan_all_plugins_with_report() -> std::result::Result<ScanReport, String>
         vst2_plugins: Vec::new(),
         directories: Vec::new(),
     };
-    for root in vst_search_directories() {
+    for root in roots {
         for dir in collect_scan_dirs(&root) {
             let canon = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
             if !visited.insert(canon) {

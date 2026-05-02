@@ -7,8 +7,8 @@ description = "Application-facing recorder library with core re-exports and opti
 
 [features]
 default = []
-# Windows-only VST2/VST3 scan, audio processing, and native editor hosting.
-vst = ["dep:egui", "dep:rack", "dep:vst3", "dep:vst", "dep:libloading", "dep:windows"]
+# VST2/VST3 scan, audio processing, and native editor hosting.
+vst = ["dep:egui", "dep:rack", "dep:vst3", "dep:vst", "dep:libloading", "dep:windows", "dep:objc"]
 
 [dependencies]
 recorder-core = { workspace = true }
@@ -26,3 +26,13 @@ windows = { version = "0.58", optional = true, features = [
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rack = { version = "0.4.8", optional = true }
+vst = { version = "0.4", optional = true }
+vst3 = { version = "0.3", optional = true }
+libloading = { version = "0.8", optional = true }
+objc = { version = "0.2", optional = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(cargo_clippy)'] }
