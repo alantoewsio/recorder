@@ -3194,7 +3194,7 @@ dependencies = [
 
 [[package]]
 name = "recorder"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "egui",
  "libloading 0.8.9",
@@ -3207,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-core"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "crossbeam-channel",
  "flacenc",
@@ -3220,7 +3220,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-host-linux"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "cpal 0.17.1",
  "recorder-core",
@@ -3229,7 +3229,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-host-macos"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "cpal 0.17.1",
  "objc2 0.5.2",
@@ -3241,29 +3241,30 @@ dependencies = [
 
 [[package]]
 name = "recorder-host-windows"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "bytemuck",
  "cpal 0.17.1",
  "recorder-core",
  "tracing",
  "windows 0.58.0",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
 name = "recorder-plugin-api"
-version = "0.9.3"
+version = "0.9.4"
 
 [[package]]
 name = "recorder-plugin-example"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "recorder-plugin-api",
 ]
 
 [[package]]
 name = "recorder-plugin-faster-whisper"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "crossbeam-channel",
  "hound",
@@ -3273,7 +3274,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-plugin-parakeet"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "crossbeam-channel",
  "hound",
@@ -3283,7 +3284,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-sdk"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "recorder-core",
  "recorder-host-linux",
@@ -3293,7 +3294,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-ui"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "crossbeam-channel",
  "eframe",

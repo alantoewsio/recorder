@@ -1,7 +1,8 @@
 use recorder_core::error::{RecordingError, Result};
 use recorder_core::format::AudioFormat;
 use recorder_core::traits::{
-    AudioHost, CaptureSource, CaptureSourceKind, DeviceInfo, StreamHandle,
+    AppCaptureBackend, AppCaptureDescriptor, AudioHost, CaptureSource, CaptureSourceKind,
+    DeviceInfo, StreamHandle,
 };
 use std::sync::Arc;
 
@@ -9,6 +10,7 @@ use crate::audio_system::WindowsAudioSystem;
 use crate::capture_cpal;
 use crate::capture_dsound;
 use crate::capture_dummy;
+use crate::capture_process_loopback;
 use crate::capture_wavein;
 
 /// Windows capture host: WASAPI, optional ASIO (via cpal), DirectSound, WinMM waveIn, or dummy.
@@ -28,6 +30,38 @@ impl Default for WindowsHost {
 impl WindowsHost {
     pub fn new(audio_system: WindowsAudioSystem) -> Result<Self> {
         Ok(Self { audio_system })
+    }
+}
+
+fn parse_app_source_id(source_id: &str) -> Result<u32> {
+    source_id
+        .strip_prefix("app:")
+        .ok_or_else(|| {
+            RecordingError::Config(format!("invalid app-output source id: {source_id}"))
+        })?
+        .parse::<u32>()
+        .map_err(|_| RecordingError::Config(format!("invalid app-output source id: {source_id}")))
+}
+
+fn app_process_source(process_id: u32, app_name: &str, app_id: Option<&str>) -> CaptureSource {
+    CaptureSource {
+        id: format!("app:{process_id}"),
+        name: app_name.to_string(),
+        default_format: Some(AudioFormat::new(
+            48_000,
+            2,
+            recorder_core::format::SampleFormat::F32,
+        )),
+        kind: CaptureSourceKind::AppOutput,
+        app: Some(AppCaptureDescriptor {
+            backend: AppCaptureBackend::WindowsProcessLoopback,
+            app_name: app_name.to_string(),
+            app_id: app_id.map(str::to_string),
+            process_id: Some(process_id),
+            instance_id: Some(process_id.to_string()),
+            supports_multi_select: true,
+            requires_system_permission: false,
+        }),
     }
 }
 
@@ -91,6 +125,9 @@ impl AudioHost for WindowsHost {
                     app: None,
                 });
             }
+            for (process_id, app_name, app_id) in capture_process_loopback::list_app_processes()? {
+                sources.push(app_process_source(process_id, &app_name, app_id.as_deref()));
+            }
         }
         Ok(sources)
     }
@@ -114,9 +151,25 @@ impl AudioHost for WindowsHost {
                     other.label()
                 ))),
             },
-            CaptureSourceKind::AppOutput => Err(RecordingError::Config(
-                "app-output capture is not implemented for the Windows host yet".into(),
-            )),
+            CaptureSourceKind::AppOutput => match self.audio_system {
+                WindowsAudioSystem::Wasapi => {
+                    let source_id = source_id.ok_or_else(|| {
+                        RecordingError::Config(
+                            "app-output capture requires a selected app source id".into(),
+                        )
+                    })?;
+                    let process_id = parse_app_source_id(source_id)?;
+                    capture_process_loopback::start_process_loopback_stream(
+                        process_id,
+                        format,
+                        on_buffer,
+                    )
+                }
+                other => Err(RecordingError::Config(format!(
+                    "app-output capture is only supported by WASAPI on Windows; current audio system is {}",
+                    other.label()
+                ))),
+            },
         }
     }
 
@@ -154,5 +207,37 @@ impl AudioHost for WindowsHost {
                 other.label()
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use recorder_core::traits::AppCaptureBackend;
+
+    use super::*;
+
+    #[test]
+    fn parse_app_source_id_accepts_pid_ids() {
+        assert_eq!(parse_app_source_id("app:42").unwrap(), 42);
+    }
+
+    #[test]
+    fn parse_app_source_id_rejects_non_app_ids() {
+        assert!(parse_app_source_id("loopback:42").is_err());
+        assert!(parse_app_source_id("app:not-a-number").is_err());
+    }
+
+    #[test]
+    fn app_process_becomes_app_output_source() {
+        let source = app_process_source(4242, "Spotify.exe", Some("C:\\Apps\\Spotify.exe"));
+        assert_eq!(source.id, "app:4242");
+        assert_eq!(source.kind, CaptureSourceKind::AppOutput);
+        let app = source.app.expect("app metadata");
+        assert_eq!(app.backend, AppCaptureBackend::WindowsProcessLoopback);
+        assert_eq!(app.process_id, Some(4242));
+        assert_eq!(app.app_name, "Spotify.exe");
+        assert_eq!(app.app_id.as_deref(), Some("C:\\Apps\\Spotify.exe"));
+        assert!(app.supports_multi_select);
+        assert!(!app.requires_system_permission);
     }
 }

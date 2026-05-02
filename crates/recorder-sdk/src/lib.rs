@@ -21,6 +21,10 @@ pub const RECORDER_SDK_INVALID_UTF8: c_int = 2;
 pub const RECORDER_SDK_INVALID_ARGUMENT: c_int = 3;
 pub const RECORDER_SDK_BUFFER_TOO_SMALL: c_int = 4;
 pub const RECORDER_SDK_ERROR: c_int = 100;
+pub const RECORDER_SDK_CAPTURE_KIND_DEFAULT: i32 = 0;
+pub const RECORDER_SDK_CAPTURE_KIND_INPUT: i32 = 1;
+pub const RECORDER_SDK_CAPTURE_KIND_LOOPBACK: i32 = 2;
+pub const RECORDER_SDK_CAPTURE_KIND_APP_OUTPUT: i32 = 3;
 
 const SAMPLE_FORMAT_DEFAULT: i32 = 0;
 const SAMPLE_FORMAT_F32: i32 = 1;
@@ -32,7 +36,7 @@ thread_local! {
 
 /// Opaque handle returned by `recorder_sdk_start_recording`.
 ///
-/// Holds one capture stream for the microphone input plus, optionally, a second one for a
+/// Holds one primary capture stream plus, optionally, a second one for a
 /// loopback (speaker output) source.
 pub struct RecorderCapture {
     captures: Vec<CaptureStream>,
@@ -44,7 +48,7 @@ pub struct RecorderCapture {
 /// struct** (e.g. `RecorderStartConfig cfg = {0};` in C) so trailing fields added in
 /// future versions remain backward-compatible.
 ///
-/// **Mixer graph:** this struct describes at most one microphone stream and one optional
+/// **Mixer graph:** this struct describes at most one primary stream and one optional
 /// loopback stream with separate file paths. Rust hosts can use the richer
 /// `recorder_core::graph` / `BusMixer` APIs for multi-bus routing; a future C entry point
 /// may expose a graph once that layout is stabilized (see `ARCHITECTURE.md`).
@@ -74,6 +78,25 @@ pub struct RecorderStartConfig {
     /// Loopback streams use the source's native format and the same `output_format`
     /// (wav/flac/mp3) as the mic side.
     pub loopback_output_path: *const c_char,
+    /// Optional primary capture source id from `recorder_sdk_list_capture_sources_json`.
+    /// When set, this supersedes `device_id` and may point at an input, loopback, or
+    /// app-output source.
+    pub source_id: *const c_char,
+    /// 0 = infer / legacy behavior, 1 = input, 2 = loopback, 3 = app-output.
+    pub source_kind: i32,
+}
+
+impl RecorderStartConfig {
+    #[cfg(test)]
+    fn zeroed() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+struct PrimarySourceSelection {
+    source_id: Option<String>,
+    kind: CaptureSourceKind,
+    format: AudioFormat,
 }
 
 fn set_last_error(message: impl AsRef<str>) {
@@ -393,9 +416,68 @@ fn requested_format(
     ))
 }
 
+fn capture_kind_from_config(kind: i32) -> recorder_core::Result<Option<CaptureSourceKind>> {
+    match kind {
+        RECORDER_SDK_CAPTURE_KIND_DEFAULT => Ok(None),
+        RECORDER_SDK_CAPTURE_KIND_INPUT => Ok(Some(CaptureSourceKind::Input)),
+        RECORDER_SDK_CAPTURE_KIND_LOOPBACK => Ok(Some(CaptureSourceKind::Loopback)),
+        RECORDER_SDK_CAPTURE_KIND_APP_OUTPUT => Ok(Some(CaptureSourceKind::AppOutput)),
+        other => Err(RecordingError::Config(format!(
+            "invalid source_kind {other}; expected 0, 1, 2, or 3"
+        ))),
+    }
+}
+
+fn requested_primary_source(
+    config: &RecorderStartConfig,
+    sources: &[recorder_core::CaptureSource],
+) -> recorder_core::Result<PrimarySourceSelection> {
+    let requested_kind = capture_kind_from_config(config.source_kind)?;
+    let requested_source_id = opt_cstr(config.source_id)
+        .map_err(|_| RecordingError::Config("invalid source_id".into()))?;
+
+    if let Some(source_id) = requested_source_id {
+        let source = if let Some(kind) = requested_kind {
+            sources.iter().find(|s| s.id == source_id && s.kind == kind)
+        } else {
+            sources.iter().find(|s| s.id == source_id)
+        }
+        .ok_or_else(|| RecordingError::Config(format!("capture source not found: {source_id}")))?;
+        let default_format =
+            source
+                .default_format
+                .unwrap_or(AudioFormat::new(48_000, 2, SampleFormat::F32));
+        return Ok(PrimarySourceSelection {
+            source_id: Some(source.id.clone()),
+            kind: source.kind,
+            format: requested_format(config, default_format)?,
+        });
+    }
+
+    let input_source = match opt_cstr(config.device_id)
+        .map_err(|_| RecordingError::Config("invalid device_id".into()))?
+    {
+        Some(device_id) => sources
+            .iter()
+            .find(|s| s.kind == CaptureSourceKind::Input && s.id == device_id),
+        None => sources.iter().find(|s| s.kind == CaptureSourceKind::Input),
+    }
+    .ok_or_else(|| RecordingError::Config("no input devices found".into()))?;
+
+    Ok(PrimarySourceSelection {
+        source_id: Some(input_source.id.clone()),
+        kind: CaptureSourceKind::Input,
+        format: requested_format(
+            config,
+            input_source
+                .default_format
+                .unwrap_or(AudioFormat::new(48_000, 2, SampleFormat::F32)),
+        )?,
+    })
+}
+
 fn start_recording_inner(config: &RecorderStartConfig) -> Result<*mut RecorderCapture, c_int> {
     let audio_system = opt_cstr(config.audio_system)?;
-    let device_id = opt_cstr(config.device_id)?;
     let raw_path = opt_cstr(config.raw_output_path)?;
     let processed_path = opt_cstr(config.processed_output_path)?;
     let loopback_source_id = opt_cstr(config.loopback_source_id)?;
@@ -424,35 +506,15 @@ fn start_recording_inner(config: &RecorderStartConfig) -> Result<*mut RecorderCa
         set_last_error(e.to_string());
         RECORDER_SDK_ERROR
     })?;
-    let devices = host.list_input_devices().map_err(|e| {
+    let sources = host.list_capture_sources().map_err(|e| {
         set_last_error(e.to_string());
         RECORDER_SDK_ERROR
     })?;
-
-    let selected = match device_id.as_deref() {
-        Some(id) => devices
-            .iter()
-            .find(|d| d.id == id)
-            .or_else(|| devices.first()),
-        None => devices.first(),
-    }
-    .ok_or_else(|| {
-        set_last_error("no input devices found");
-        RECORDER_SDK_ERROR
-    })?;
-    if device_id.is_some() && selected.id != device_id.as_deref().unwrap_or_default() {
-        set_last_error("requested device id was not found");
-        return Err(RECORDER_SDK_INVALID_ARGUMENT);
-    }
-
-    let default_format =
-        selected
-            .default_format
-            .unwrap_or(AudioFormat::new(48_000, 2, SampleFormat::F32));
-    let format = requested_format(config, default_format).map_err(|e| {
+    let selection = requested_primary_source(config, &sources).map_err(|e| {
         set_last_error(e.to_string());
         RECORDER_SDK_INVALID_ARGUMENT
     })?;
+    let format = selection.format;
 
     let raw_sink = raw_path
         .as_deref()
@@ -475,8 +537,8 @@ fn start_recording_inner(config: &RecorderStartConfig) -> Result<*mut RecorderCa
     let mic_capture = session
         .add_capture_stream(
             host.as_ref(),
-            device_id.as_deref(),
-            CaptureSourceKind::Input,
+            selection.source_id.as_deref(),
+            selection.kind,
             format,
             StreamOptions {
                 raw_sink,
@@ -498,10 +560,6 @@ fn start_recording_inner(config: &RecorderStartConfig) -> Result<*mut RecorderCa
         loopback_source_id.as_deref(),
         loopback_output_path.as_deref(),
     ) {
-        let sources = host.list_capture_sources().map_err(|e| {
-            set_last_error(e.to_string());
-            RECORDER_SDK_ERROR
-        })?;
         let loopback_source = sources
             .iter()
             .find(|s| s.id == src_id && s.kind == CaptureSourceKind::Loopback)
@@ -721,6 +779,9 @@ mod tests {
     };
 
     use super::{capture_sources_json, json_escape, AudioHost, CaptureSourceKind};
+    use super::{
+        requested_primary_source, RecorderStartConfig, RECORDER_SDK_CAPTURE_KIND_APP_OUTPUT,
+    };
 
     struct FakeHost {
         sources: Vec<CaptureSource>,
@@ -775,5 +836,32 @@ mod tests {
         assert!(json.contains("\"backend\":\"windows-process-loopback\""));
         assert!(json.contains("\"process_id\":42"));
         assert!(json.contains("\"supports_multi_select\":true"));
+    }
+
+    #[test]
+    fn requested_primary_source_can_select_app_output() {
+        let sources = vec![CaptureSource {
+            id: "app:42".into(),
+            name: "Music Player".into(),
+            default_format: Some(AudioFormat::new(48_000, 2, SampleFormat::F32)),
+            kind: CaptureSourceKind::AppOutput,
+            app: None,
+        }];
+        let cfg = RecorderStartConfig {
+            source_id: c"app:42".as_ptr(),
+            source_kind: RECORDER_SDK_CAPTURE_KIND_APP_OUTPUT,
+            sample_rate_hz: 0,
+            channels: 0,
+            sample_format: super::SAMPLE_FORMAT_DEFAULT,
+            ..RecorderStartConfig::zeroed()
+        };
+
+        let selection = requested_primary_source(&cfg, &sources).expect("selection");
+        assert_eq!(selection.source_id.as_deref(), Some("app:42"));
+        assert_eq!(selection.kind, CaptureSourceKind::AppOutput);
+        assert_eq!(
+            selection.format,
+            AudioFormat::new(48_000, 2, SampleFormat::F32)
+        );
     }
 }

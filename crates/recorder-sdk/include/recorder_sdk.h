@@ -25,6 +25,11 @@ extern "C" {
 #define RECORDER_SDK_BUFFER_TOO_SMALL 4
 #define RECORDER_SDK_ERROR 100
 
+#define RECORDER_SDK_CAPTURE_KIND_DEFAULT 0
+#define RECORDER_SDK_CAPTURE_KIND_INPUT 1
+#define RECORDER_SDK_CAPTURE_KIND_LOOPBACK 2
+#define RECORDER_SDK_CAPTURE_KIND_APP_OUTPUT 3
+
 #define RECORDER_SDK_SAMPLE_FORMAT_DEFAULT 0
 #define RECORDER_SDK_SAMPLE_FORMAT_F32 1
 #define RECORDER_SDK_SAMPLE_FORMAT_I16 2
@@ -56,6 +61,20 @@ typedef struct RecorderStartConfig {
 
     /* 0 = selected device default, 1 = f32, 2 = i16. */
     int32_t sample_format;
+
+    /* Optional speaker-output source id from recorder_sdk_list_capture_sources_json.
+       Null disables secondary loopback capture; non-null requires loopback_output_path too. */
+    const char* loopback_source_id;
+
+    /* Where to write the secondary loopback recording. Required when loopback_source_id is set. */
+    const char* loopback_output_path;
+
+    /* Optional primary capture source id from recorder_sdk_list_capture_sources_json.
+       When set, this supersedes device_id and may point at an input, loopback, or app-output source. */
+    const char* source_id;
+
+    /* 0 = infer / legacy behavior, 1 = input, 2 = loopback, 3 = app-output. */
+    int32_t source_kind;
 } RecorderStartConfig;
 
 RECORDER_SDK_API const char* recorder_sdk_version(void);
@@ -83,6 +102,17 @@ RECORDER_SDK_API const char* recorder_sdk_last_error(void);
    ]
 */
 RECORDER_SDK_API int recorder_sdk_list_devices_json(
+    const char* audio_system,
+    char* out_json,
+    size_t out_json_len,
+    size_t* required_len_out);
+
+/* Enumerates all capture sources as JSON, including inputs, loopback sources, and app-output sources.
+
+   required_len_out receives the required byte count including the NUL terminator.
+   If out_json is NULL or too small, returns RECORDER_SDK_BUFFER_TOO_SMALL.
+*/
+RECORDER_SDK_API int recorder_sdk_list_capture_sources_json(
     const char* audio_system,
     char* out_json,
     size_t out_json_len,

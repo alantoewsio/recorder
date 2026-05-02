@@ -35,11 +35,54 @@ The UI shows a **● Speaker output is being recorded** indicator while a loopba
 
 `list_capture_sources()` and `recorder_sdk_list_capture_sources_json()` now reserve a first-class `app-output` source kind for audio rendered by a specific running app instance. Each such source can carry backend metadata such as process id, app id, instance id, backend name, and whether callers may multi-select several app instances and mix them above the host layer.
 
-The core/source-model work is in place, but the concrete host backends are not all implemented yet. Today:
+This is intended to behave like any other selectable recording source at the API boundary: callers enumerate capture sources once, show `input`, `loopback`, and `app-output` entries in the same picker model, then pass the selected source ids back into the host layer. The difference is semantic, not structural:
 
-- Windows still exposes whole-device loopback in the shipped host crate; the intended next backend is WASAPI process loopback.
+- `input` means a traditional microphone / line-in device.
+- `loopback` means system or device output capture.
+- `app-output` means output from one specific running app instance.
+
+Per-app sources are instance-bound, not name-bound. A caller should treat `process_id` and `instance_id` as the durable identity for the currently running app instance, and should expect that source to disappear when the app exits. Auto-rebinding to a later instance of "the same app" belongs in the consuming application, not in `recorder-core`.
+
+When a user selects multiple app-output sources, the intended model is one capture leg per app source, mixed above the host layer with the existing bus/mixer graph. Hosts should not collapse several selected apps into one opaque pseudo-device. This keeps the API aligned with how mic + loopback recording already works and preserves per-source routing flexibility.
+
+The JSON returned by `recorder_sdk_list_capture_sources_json()` uses this shape for app sources:
+
+```json
+{
+  "id": "app:42",
+  "name": "Music Player",
+  "kind": "app-output",
+  "default_format": {
+    "sample_rate_hz": 48000,
+    "channels": 2,
+    "sample_format": "f32"
+  },
+  "app": {
+    "backend": "windows-process-loopback",
+    "app_name": "Music Player",
+    "app_id": "com.example.player",
+    "process_id": 42,
+    "instance_id": "session-42",
+    "supports_multi_select": true,
+    "requires_system_permission": false
+  }
+}
+```
+
+Current backend labels are:
+
+- `windows-process-loopback`
+- `macos-screencapturekit`
+- `linux-pipewire-route`
+- `unsupported`
+
+Current host status:
+
+- Windows supports per-app output capture through WASAPI process loopback. `CaptureSourceKind::AppOutput` sources enumerate as `app:<pid>` and can be opened directly through `AudioHost::start_capture(..., CaptureSourceKind::AppOutput, ...)`.
 - macOS still exposes whole-system audio via ScreenCaptureKit loopback or virtual drivers; per-app ScreenCaptureKit capture is future work.
 - Linux still exposes monitor-loopback sources; PipeWire virtual-sink routing for app output is future work.
+
+So `app-output` is now a fully startable capture path on Windows, and a modeled-but-not-yet-startable contract on macOS and Linux. Hosts that have not implemented it still fall back to the default `AudioHost::start_capture(..., CaptureSourceKind::AppOutput, ...)` unsupported error.
 
 ## Release Builds
 
@@ -52,13 +95,13 @@ This repo includes a GitHub Actions workflow at [`.github/workflows/release.yml`
 - `recorder-sdk-macos-x64.tar.gz`
 - `recorder-sdk-linux-x64.tar.gz`
 
-Pushing a `v*` tag (for example `v0.9.3`) runs this workflow and then **creates a [GitHub Release](https://github.com/alantoewsio/recorder/releases)** for that tag, with the zip/tar.gz files attached as downloadable assets (not only workflow artifacts).
+Pushing a `v*` tag (for example `v0.9.4`) runs this workflow and then **creates a [GitHub Release](https://github.com/alantoewsio/recorder/releases)** for that tag, with the zip/tar.gz files attached as downloadable assets (not only workflow artifacts).
 
 Run it manually from GitHub Actions (`Release Builds` → `Run workflow`) on a branch to build artifacts without publishing a Release. To publish from an existing tag after workflow changes, either select that tag as the run ref if GitHub offers it, or move the tag (`git push origin :refs/tags/vX.Y.Z` then re-tag and push) or publish a new patch tag.
 
 ```bash
-git tag v0.9.3
-git push origin v0.9.3
+git tag v0.9.4
+git push origin v0.9.4
 ```
 
 The Windows artifact is built with `--features vst` and includes `recorder-ui.exe` plus `libmp3lame.dll` when present in `target/release`. macOS and Linux artifacts build the portable UI without the Windows-only VST feature.
@@ -157,7 +200,7 @@ recorder_sdk_capture_free(capture);
 free(json);
 ```
 
-To also record speaker output, enumerate every capture source (inputs, loopback, and future app-output entries) with `recorder_sdk_list_capture_sources_json`, pick a loopback entry, and set the loopback fields on `RecorderStartConfig`:
+To also record speaker output, enumerate every capture source (inputs, loopback, and app-output entries) with `recorder_sdk_list_capture_sources_json`, pick a loopback entry, and set the loopback fields on `RecorderStartConfig`:
 
 ```c
 RecorderStartConfig cfg = {0};
@@ -172,6 +215,22 @@ recorder_sdk_start_recording(&cfg, &capture);
 /* ... */
 recorder_sdk_capture_stop(capture); /* joins both mic and speaker streams */
 recorder_sdk_capture_free(capture);
+```
+
+`RecorderStartConfig` models one primary source plus one optional secondary loopback stream. The primary source may now be an `input`, `loopback`, or `app-output` source by filling `source_id` and `source_kind`. The C ABI still does not have first-class fields for starting several app-output sources at once; multi-app mixes remain a Rust-side orchestration concern for now.
+
+To start recording a selected app on Windows through the SDK, set the primary source fields from `recorder_sdk_list_capture_sources_json`:
+
+```c
+RecorderStartConfig cfg = {0};
+cfg.audio_system = "wasapi";
+cfg.raw_output_path = "app.wav";
+cfg.output_format = "wav";
+cfg.source_id = "app:12345"; /* id returned by list_capture_sources_json */
+cfg.source_kind = RECORDER_SDK_CAPTURE_KIND_APP_OUTPUT;
+
+RecorderCapture* capture = NULL;
+int code = recorder_sdk_start_recording(&cfg, &capture);
 ```
 
 **Always zero-initialize `RecorderStartConfig`** (`= {0}` in C, `memset` in C++); the struct is grown additively in the C ABI and stale stack values in trailing fields would otherwise be interpreted as set.
@@ -196,7 +255,7 @@ Available `recorder-core` features:
 A host app is responsible for UI, permissions, output-path selection, and lifetime management. The recorder component only needs:
 
 - an `AudioHost`
-- a selected `DeviceInfo`
+- one or more selected `CaptureSource`s
 - an `AudioFormat`
 - one or more `AudioSink`s
 - optional `AudioProcessor`s
@@ -253,6 +312,8 @@ capture.stop();
 ```
 
 `CaptureStream::stop()` stops the host stream, closes internal queues, joins writer threads, and flushes/finalizes sinks. This is required for file formats with final headers or trailers, especially WAV, FLAC, and MP3.
+
+If you are building per-app recording, prefer `AudioHost::list_capture_sources()` and `RecordingSession::add_capture_stream(..., CaptureSourceKind::AppOutput, ...)` rather than treating app output as a special loopback alias. App-output sources are part of the same capture-source model as microphones and loopback sources, but they represent running app instances instead of hardware devices.
 
 ### Recording Raw And Processed Files
 
@@ -378,7 +439,7 @@ The model card lists NeMo 2.7.3, Linux, and NVIDIA GPU hardware as the supported
 
 ### Device And Format Selection
 
-The host crate exposes input devices through `AudioHost::list_input_devices()`. Each `DeviceInfo` may include a `default_format`.
+The host crate exposes input devices through `AudioHost::list_input_devices()`, and the full source model through `AudioHost::list_capture_sources()`. Each source may include a `default_format`.
 
 ```rust
 let devices = host.list_input_devices()?;
@@ -387,7 +448,16 @@ for device in &devices {
 }
 ```
 
-Use the device's default format unless your app has already verified the backend supports a different one. Current host implementations are conservative and may reject mismatched sample rates, channel counts, or sample formats.
+For new integrations, prefer enumerating `CaptureSource` entries:
+
+```rust
+let sources = host.list_capture_sources()?;
+for source in &sources {
+    println!("{} ({:?})", source.name, source.kind);
+}
+```
+
+Use the source's default format unless your app has already verified the backend supports a different one. Current host implementations are conservative and may reject mismatched sample rates, channel counts, or sample formats.
 
 ### Pause / Resume
 

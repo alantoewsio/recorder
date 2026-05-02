@@ -84,9 +84,30 @@ Per-OS app-output support:
 
 | OS | App-output path | Notes |
 |----|-----------------|-------|
-| Windows | **WASAPI process loopback** | `CaptureSourceKind::AppOutput` and per-app metadata are part of the core contract. The Windows host is the first intended concrete backend, using process-bound loopback rather than endpoint loopback. |
+| Windows | **WASAPI process loopback** | Implemented in `recorder-host-windows`. The host enumerates live `app:<pid>` sources and opens them with process-bound loopback rather than endpoint loopback. |
 | Linux | **PipeWire route to recorder-owned virtual sink** | Contract is modeled in `recorder-core`, but the routing helper is still a future backend. The intended design is one capture leg per selected app stream, mixed above the host layer. |
 | macOS | **ScreenCaptureKit app capture** | Contract is modeled in `recorder-core`, but the per-app backend is still future work. The existing SCK integration currently exposes whole-system audio as loopback only. |
+
+App-output sources are meant to be first-class capture sources, not disguised loopback devices. The core contract is:
+
+- `CaptureSourceKind::AppOutput` identifies a running app instance as a source.
+- `CaptureSource.app` carries backend-specific metadata in a portable shape.
+- `AppCaptureDescriptor.process_id` and `instance_id` identify the current live instance.
+- `AppCaptureDescriptor.supports_multi_select` tells the caller whether several app instances can be opened independently and mixed in the caller.
+
+The instance-binding point matters: the source identity is the currently running app instance, not just an executable name. If that app exits, the source should be considered gone. Rebinding to a later instance of the same app is intentionally left to the consuming application.
+
+The current metadata contract in [`recorder-core`](crates/recorder-core/src/traits.rs) is:
+
+- `backend`: `WindowsProcessLoopback`, `MacosScreenCaptureKit`, `LinuxPipewireRoute`, or `Unsupported`
+- `app_name`: user-facing display name
+- `app_id`: bundle identifier / executable identifier when known
+- `process_id`: OS process id when known
+- `instance_id`: backend-defined live identity such as a session serial
+- `supports_multi_select`: whether the caller may open several app sources in parallel
+- `requires_system_permission`: whether the OS may require additional consent
+
+The intended open path is `AudioHost::start_capture(source_id, CaptureSourceKind::AppOutput, ...)`. Windows now overrides that path with WASAPI process loopback; the default trait implementation still rejects it for hosts that have not opted in yet.
 
 ### Mixed-mode output
 
@@ -107,9 +128,23 @@ flowchart LR
 
 A soft-knee limiter on sum paths protects against clipping.
 
+This same model is the intended implementation strategy for multi-app capture. If a caller selects several `AppOutput` sources, the host should open one capture stream per selected app instance, then feed those legs into `BusMixer` / `MixerGraph` above the host layer. That keeps source ownership explicit and avoids hiding several app captures behind one synthetic host source.
+
 ### C SDK note
 
-[`recorder-sdk`](crates/recorder-sdk/src/lib.rs) still exposes the original mic ± loopback `RecorderStartConfig`. `recorder_sdk_list_capture_sources_json` now also surfaces `kind="app-output"` plus per-app metadata for future callers, but starting app-output capture still needs a later C ABI revision. A future **v2** entry point may accept a serialized mixer graph once the Rust `MixerGraph` API is stable; new fields on the C struct will remain trailing and zero-initialized for compatibility.
+[`recorder-sdk`](crates/recorder-sdk/src/lib.rs) exposes a compact `RecorderStartConfig` with one primary source plus one optional secondary loopback source. `recorder_sdk_list_capture_sources_json` surfaces `kind="app-output"` plus per-app metadata, and the primary source may now be started as `input`, `loopback`, or `app-output` via `source_id` + `source_kind`. A future **v2** entry point may accept a serialized mixer graph once the Rust `MixerGraph` API is stable; new fields on the C struct will remain trailing and zero-initialized for compatibility.
+
+Current SDK JSON for app-output sources includes:
+
+- top-level `kind: "app-output"`
+- top-level `id`, `name`, and `default_format`
+- nested `app.backend`
+- nested `app.app_name`
+- nested `app.app_id`
+- nested `app.process_id`
+- nested `app.instance_id`
+- nested `app.supports_multi_select`
+- nested `app.requires_system_permission`
 
 ## Plugins
 

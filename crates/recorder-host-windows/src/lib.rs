@@ -16,6 +16,8 @@ mod capture_dsound;
 #[cfg(windows)]
 mod capture_dummy;
 #[cfg(windows)]
+mod capture_process_loopback;
+#[cfg(windows)]
 mod capture_wavein;
 #[cfg(windows)]
 mod win;
