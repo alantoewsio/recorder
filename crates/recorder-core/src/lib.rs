@@ -7,6 +7,7 @@
 
 pub mod analyzer;
 pub mod buffer;
+pub mod channel;
 pub mod composite;
 pub mod control;
 pub mod error;
@@ -30,6 +31,11 @@ pub mod mixer;
 
 pub use analyzer::{AudioAnalyzer, VoiceActivityAnalyzer};
 pub use buffer::AudioBuffer;
+pub use channel::{
+    amplitude_to_db, db_to_gain, ChannelProcessor, ChannelProcessorConfig, CompressorConfig,
+    NoiseGateConfig, ParametricEqBandConfig, ParametricEqConfig, ParametricEqFilterType,
+    PARAMETRIC_EQ_BAND_COUNT,
+};
 pub use composite::{CompositeSink, TeeAudioSink};
 pub use control::{ControllablePlugin, ParameterInfo, ParameterValue, PluginCommand, PluginId};
 pub use error::{RecordingError, Result};
@@ -58,5 +64,6 @@ pub use graph::{spawn_single_bus_mixer, BusId, InputStripId, MixerGraph};
 #[cfg(feature = "mixer")]
 pub use mixer::{
     bus_mixer_legs, mixer_channels, BusLegConfig, BusMixer, BusMixerConfig, MixMode, MixerConfig,
-    MixerInputSink, StreamMixer,
+    MixerInputSink, RoutingMixer, RoutingMixerObserver, RoutingMixerRoute, RoutingMixerSource,
+    RoutingMixerState, RoutingMixerTarget, StreamMixer,
 };

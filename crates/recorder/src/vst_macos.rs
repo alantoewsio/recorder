@@ -16,6 +16,7 @@
 use std::ffi::{c_void, CString};
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 
 use libloading::Library;
@@ -23,11 +24,14 @@ use objc::runtime::Object;
 use objc::{class, msg_send, sel, sel_impl};
 use rack::traits::PluginScanner;
 use rack::vst3::Vst3Scanner;
-use vst::host::{Host, PluginLoader};
+use recorder_core::buffer::AudioBuffer;
+use vst::host::{Host, HostBuffer, PluginLoader};
 use vst::plugin::Plugin;
 use vst3::Steinberg::Vst::{
-    BusDirections_, IComponent, IComponentTrait, IConnectionPoint, IConnectionPointTrait,
-    IEditController, IEditControllerTrait, MediaTypes_,
+    AudioBusBuffers, AudioBusBuffers__type0, BusDirections_, IAudioProcessor, IAudioProcessorTrait,
+    IComponent, IComponentTrait, IConnectionPoint, IConnectionPointTrait, IEditController,
+    IEditControllerTrait, MediaTypes_, ProcessData, ProcessModes_, ProcessSetup,
+    SymbolicSampleSizes_,
 };
 use vst3::Steinberg::{
     kResultOk, IPlugViewTrait, IPluginBaseTrait, IPluginFactory, IPluginFactoryTrait,
@@ -70,6 +74,8 @@ struct MacVst3EditorState {
     _component: ComPtr<IComponent>,
     _factory: ComPtr<IPluginFactory>,
     _library: Library,
+    audio: Option<ComPtr<IAudioProcessor>>,
+    audio_rx: Receiver<AudioBuffer>,
 }
 
 struct MacVst2EditorState {
@@ -77,6 +83,37 @@ struct MacVst2EditorState {
     _editor: Box<dyn vst::editor::Editor>,
     _plugin: vst::host::PluginInstance,
     _loader: PluginLoader<MacVst2Host>,
+    audio_rx: Receiver<AudioBuffer>,
+    host_buffer: HostBuffer<f32>,
+    inputs: Vec<Vec<f32>>,
+    outputs: Vec<Vec<f32>>,
+    input_channels: usize,
+    output_channels: usize,
+}
+
+pub struct NativeVstEditorHandle {
+    audio_tx: SyncSender<AudioBuffer>,
+    state: NativeVstEditorState,
+}
+
+enum NativeVstEditorState {
+    Vst3(Box<MacVst3EditorState>),
+    Vst2(Box<MacVst2EditorState>),
+}
+
+impl NativeVstEditorHandle {
+    pub fn audio_sender(&self) -> SyncSender<AudioBuffer> {
+        self.audio_tx.clone()
+    }
+
+    pub fn poll_audio(&mut self) {
+        match &mut self.state {
+            NativeVstEditorState::Vst3(state) => unsafe {
+                drain_vst3_editor_audio(state.audio.as_ref(), &state.audio_rx);
+            },
+            NativeVstEditorState::Vst2(state) => drain_vst2_editor_audio(state),
+        }
+    }
 }
 
 pub fn vst_search_directories() -> Vec<PathBuf> {
@@ -96,16 +133,27 @@ pub fn open_native_vst_editor(
     path: impl AsRef<Path>,
     title: impl Into<String>,
 ) -> Result<(), String> {
+    let mut handle = open_native_vst_editor_for_live_audio(path, title)?;
+    handle.poll_audio();
+    Box::leak(Box::new(handle));
+    Ok(())
+}
+
+pub fn open_native_vst_editor_for_live_audio(
+    path: impl AsRef<Path>,
+    title: impl Into<String>,
+) -> Result<NativeVstEditorHandle, String> {
     let path = path.as_ref();
     let title = title.into();
+    let (audio_tx, audio_rx) = std::sync::mpsc::sync_channel(8);
     match path
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase())
         .as_deref()
     {
-        Some("vst3") => open_vst3_editor(path, &title),
-        Some("vst") => open_vst2_editor(path, &title),
+        Some("vst3") => open_vst3_editor_handle(path, &title, audio_tx, audio_rx),
+        Some("vst") => open_vst2_editor_handle(path, &title, audio_tx, audio_rx),
         other => Err(format!(
             "unsupported macOS VST bundle extension for {}: {:?}",
             path.display(),
@@ -115,13 +163,55 @@ pub fn open_native_vst_editor(
 }
 
 pub fn open_vst3_editor(path: impl AsRef<Path>, title: &str) -> Result<(), String> {
+    let mut handle = open_vst3_editor_for_live_audio(path, title)?;
+    handle.poll_audio();
+    Box::leak(Box::new(handle));
+    Ok(())
+}
+
+pub fn open_vst3_editor_for_live_audio(
+    path: impl AsRef<Path>,
+    title: &str,
+) -> Result<NativeVstEditorHandle, String> {
     let bundle_path = path.as_ref().to_path_buf();
     let unique_id = find_vst3_unique_id(&bundle_path)?;
-    unsafe { open_vst3_editor_inner(bundle_path, unique_id, title) }
+    let (audio_tx, audio_rx) = std::sync::mpsc::sync_channel(8);
+    unsafe { open_vst3_editor_inner(bundle_path, unique_id, title, audio_tx, audio_rx) }
 }
 
 pub fn open_vst2_editor(path: impl AsRef<Path>, title: &str) -> Result<(), String> {
-    unsafe { open_vst2_editor_inner(path.as_ref().to_path_buf(), title) }
+    let mut handle = open_vst2_editor_for_live_audio(path, title)?;
+    handle.poll_audio();
+    Box::leak(Box::new(handle));
+    Ok(())
+}
+
+pub fn open_vst2_editor_for_live_audio(
+    path: impl AsRef<Path>,
+    title: &str,
+) -> Result<NativeVstEditorHandle, String> {
+    let (audio_tx, audio_rx) = std::sync::mpsc::sync_channel(8);
+    unsafe { open_vst2_editor_inner(path.as_ref().to_path_buf(), title, audio_tx, audio_rx) }
+}
+
+fn open_vst3_editor_handle(
+    path: &Path,
+    title: &str,
+    audio_tx: SyncSender<AudioBuffer>,
+    audio_rx: Receiver<AudioBuffer>,
+) -> Result<NativeVstEditorHandle, String> {
+    let bundle_path = path.to_path_buf();
+    let unique_id = find_vst3_unique_id(&bundle_path)?;
+    unsafe { open_vst3_editor_inner(bundle_path, unique_id, title, audio_tx, audio_rx) }
+}
+
+fn open_vst2_editor_handle(
+    path: &Path,
+    title: &str,
+    audio_tx: SyncSender<AudioBuffer>,
+    audio_rx: Receiver<AudioBuffer>,
+) -> Result<NativeVstEditorHandle, String> {
+    unsafe { open_vst2_editor_inner(path.to_path_buf(), title, audio_tx, audio_rx) }
 }
 
 fn find_vst3_unique_id(bundle_path: &Path) -> Result<String, String> {
@@ -237,7 +327,9 @@ unsafe fn open_vst3_editor_inner(
     bundle_path: PathBuf,
     class_id_hex: String,
     title: &str,
-) -> Result<(), String> {
+    audio_tx: SyncSender<AudioBuffer>,
+    audio_rx: Receiver<AudioBuffer>,
+) -> Result<NativeVstEditorHandle, String> {
     let binary_path = bundle_binary_path(&bundle_path)?;
     let lib =
         Library::new(&binary_path).map_err(|e| format!("load {}: {e}", binary_path.display()))?;
@@ -262,6 +354,7 @@ unsafe fn open_vst3_editor_inner(
     activate_all_buses(&component, K_EVENT, K_OUTPUT);
     activate_all_buses(&component, K_AUDIO, K_INPUT);
     activate_all_buses(&component, K_AUDIO, K_OUTPUT);
+    let editor_audio = setup_vst3_editor_audio_processor(&component, 48_000, 4096);
 
     let controller = get_or_create_controller(&component, &factory)?
         .ok_or_else(|| "no IEditController".to_string())?;
@@ -302,9 +395,114 @@ unsafe fn open_vst3_editor_inner(
         _component: component,
         _factory: factory,
         _library: lib,
+        audio: editor_audio,
+        audio_rx,
     });
-    Box::leak(state);
-    Ok(())
+    Ok(NativeVstEditorHandle {
+        audio_tx,
+        state: NativeVstEditorState::Vst3(state),
+    })
+}
+
+unsafe fn setup_vst3_editor_audio_processor(
+    component: &ComPtr<IComponent>,
+    sample_rate_hz: u32,
+    max_block: usize,
+) -> Option<ComPtr<IAudioProcessor>> {
+    let audio = component.cast::<IAudioProcessor>()?;
+    if audio.canProcessSampleSize(SymbolicSampleSizes_::kSample32 as i32) != kResultOk {
+        return None;
+    }
+    let mut setup = ProcessSetup {
+        processMode: ProcessModes_::kRealtime as i32,
+        symbolicSampleSize: SymbolicSampleSizes_::kSample32 as i32,
+        maxSamplesPerBlock: max_block as i32,
+        sampleRate: sample_rate_hz as f64,
+    };
+    if audio.setupProcessing(&mut setup) != kResultOk {
+        return None;
+    }
+    if audio.setProcessing(1) != kResultOk {
+        return None;
+    }
+    Some(audio)
+}
+
+unsafe fn process_vst3_editor_audio_buffer(audio: &ComPtr<IAudioProcessor>, buffer: &AudioBuffer) {
+    let frames = buffer.frames;
+    if frames == 0 || frames > i32::MAX as usize {
+        return;
+    }
+    let channels = buffer.format.channels as usize;
+    if channels != 1 && channels != 2 {
+        return;
+    }
+
+    let mut left = vec![0.0f32; frames];
+    let mut right = vec![0.0f32; frames];
+    match channels {
+        1 => {
+            left.copy_from_slice(&buffer.data[..frames]);
+            right.copy_from_slice(&buffer.data[..frames]);
+        }
+        2 => {
+            for frame in 0..frames {
+                left[frame] = buffer.data[frame * 2];
+                right[frame] = buffer.data[frame * 2 + 1];
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    let mut out_left = vec![0.0f32; frames];
+    let mut out_right = vec![0.0f32; frames];
+    let mut input_ptrs = vec![left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut output_ptrs = vec![out_left.as_mut_ptr(), out_right.as_mut_ptr()];
+    let mut inputs = [AudioBusBuffers {
+        numChannels: 2,
+        silenceFlags: 0,
+        __field0: AudioBusBuffers__type0 {
+            channelBuffers32: input_ptrs.as_mut_ptr(),
+        },
+    }];
+    let mut outputs = [AudioBusBuffers {
+        numChannels: 2,
+        silenceFlags: 0,
+        __field0: AudioBusBuffers__type0 {
+            channelBuffers32: output_ptrs.as_mut_ptr(),
+        },
+    }];
+    let mut data = ProcessData {
+        processMode: ProcessModes_::kRealtime as i32,
+        symbolicSampleSize: SymbolicSampleSizes_::kSample32 as i32,
+        numSamples: frames as i32,
+        numInputs: 1,
+        numOutputs: 1,
+        inputs: inputs.as_mut_ptr(),
+        outputs: outputs.as_mut_ptr(),
+        inputParameterChanges: ptr::null_mut(),
+        outputParameterChanges: ptr::null_mut(),
+        inputEvents: ptr::null_mut(),
+        outputEvents: ptr::null_mut(),
+        processContext: ptr::null_mut(),
+    };
+    let _ = audio.process(&mut data);
+}
+
+unsafe fn drain_vst3_editor_audio(
+    audio: Option<&ComPtr<IAudioProcessor>>,
+    audio_rx: &Receiver<AudioBuffer>,
+) {
+    let Some(audio) = audio else {
+        while audio_rx.try_recv().is_ok() {}
+        return;
+    };
+    loop {
+        match audio_rx.try_recv() {
+            Ok(buffer) => process_vst3_editor_audio_buffer(audio, &buffer),
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        }
+    }
 }
 
 unsafe fn vst3_view_size(view: &ComPtr<vst3::Steinberg::IPlugView>) -> (f64, f64) {
@@ -331,7 +529,12 @@ impl Host for MacVst2Host {
     fn update_display(&self) {}
 }
 
-unsafe fn open_vst2_editor_inner(bundle_path: PathBuf, title: &str) -> Result<(), String> {
+unsafe fn open_vst2_editor_inner(
+    bundle_path: PathBuf,
+    title: &str,
+    audio_tx: SyncSender<AudioBuffer>,
+    audio_rx: Receiver<AudioBuffer>,
+) -> Result<NativeVstEditorHandle, String> {
     let binary_path = bundle_binary_path(&bundle_path)?;
     let host = Arc::new(Mutex::new(MacVst2Host));
     let mut loader = PluginLoader::load(&binary_path, host)
@@ -344,6 +547,9 @@ unsafe fn open_vst2_editor_inner(bundle_path: PathBuf, title: &str) -> Result<()
     plugin.set_block_size(4096);
     plugin.resume();
     plugin.start_process();
+    let info = plugin.get_info();
+    let input_channels = info.inputs.max(0) as usize;
+    let output_channels = info.outputs.max(0) as usize;
     let mut editor = plugin
         .get_editor()
         .ok_or_else(|| "plugin reports no editor".to_string())?;
@@ -363,14 +569,84 @@ unsafe fn open_vst2_editor_inner(bundle_path: PathBuf, title: &str) -> Result<()
         return Err("Editor::open returned false (plugin refused parent NSView)".into());
     }
     show_window(window);
+    let host_buffer = HostBuffer::<f32>::new(input_channels, output_channels);
+    let inputs = (0..input_channels).map(|_| vec![0.0f32; 4096]).collect();
+    let outputs = (0..output_channels).map(|_| vec![0.0f32; 4096]).collect();
     let state = Box::new(MacVst2EditorState {
         _window: window,
         _editor: editor,
         _plugin: plugin,
         _loader: loader,
+        audio_rx,
+        host_buffer,
+        inputs,
+        outputs,
+        input_channels,
+        output_channels,
     });
-    Box::leak(state);
-    Ok(())
+    Ok(NativeVstEditorHandle {
+        audio_tx,
+        state: NativeVstEditorState::Vst2(state),
+    })
+}
+
+fn drain_vst2_editor_audio(state: &mut MacVst2EditorState) {
+    loop {
+        match state.audio_rx.try_recv() {
+            Ok(buffer) => process_vst2_editor_audio_buffer(state, &buffer),
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        }
+    }
+    state._editor.idle();
+}
+
+fn process_vst2_editor_audio_buffer(state: &mut MacVst2EditorState, buffer: &AudioBuffer) {
+    let frames = buffer.frames.min(4096);
+    if frames == 0 {
+        return;
+    }
+    let channels = buffer.format.channels as usize;
+    if channels != 1 && channels != 2 {
+        return;
+    }
+
+    if let Some(plane) = state.inputs.get_mut(0) {
+        match channels {
+            2 => {
+                for frame in 0..frames {
+                    plane[frame] = buffer.data[frame * 2];
+                }
+            }
+            1 => plane[..frames].copy_from_slice(&buffer.data[..frames]),
+            _ => unreachable!(),
+        }
+    }
+    if let Some(plane) = state.inputs.get_mut(1) {
+        match channels {
+            2 => {
+                for frame in 0..frames {
+                    plane[frame] = buffer.data[frame * 2 + 1];
+                }
+            }
+            1 => plane[..frames].copy_from_slice(&buffer.data[..frames]),
+            _ => unreachable!(),
+        }
+    }
+    for plane in state.inputs.iter_mut().skip(2) {
+        plane[..frames].fill(0.0);
+    }
+    for plane in &mut state.outputs {
+        plane[..frames].fill(0.0);
+    }
+
+    let in_slices: Vec<&[f32]> = state.inputs.iter().map(|v| &v[..frames]).collect();
+    let mut out_slices: Vec<&mut [f32]> =
+        state.outputs.iter_mut().map(|v| &mut v[..frames]).collect();
+    if in_slices.len() != state.input_channels || out_slices.len() != state.output_channels {
+        return;
+    }
+    let mut audio_buf = state.host_buffer.bind(&in_slices, &mut out_slices);
+    state._plugin.process(&mut audio_buf);
 }
 
 unsafe fn ns_string(s: &str) -> Result<*mut Object, String> {

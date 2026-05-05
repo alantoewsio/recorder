@@ -66,6 +66,34 @@ impl MacosHost {
             }
         }
     }
+
+    fn resolve_output_device(&self, device_id: Option<&str>) -> Result<Device> {
+        match device_id {
+            None => self
+                .host
+                .default_output_device()
+                .ok_or_else(|| RecordingError::Device("no default output device".into())),
+            Some(id) => {
+                let outputs: Vec<_> = self
+                    .host
+                    .output_devices()
+                    .map_err(|e| {
+                        RecordingError::Device(format!("enumerating output devices: {e}"))
+                    })?
+                    .collect();
+                for d in outputs {
+                    if let Ok(dev_id) = d.id() {
+                        if dev_id.to_string() == *id {
+                            return Ok(d);
+                        }
+                    }
+                }
+                Err(RecordingError::Device(format!(
+                    "output device not found: {id}"
+                )))
+            }
+        }
+    }
 }
 
 impl AudioHost for MacosHost {
@@ -85,6 +113,39 @@ impl AudioHost for MacosHost {
                 .map_err(|e| RecordingError::Device(format!("device description: {e}")))?;
             let name = desc.name().to_string();
             let default_format = device.default_input_config().ok().map(|c| {
+                let cfg = c.config();
+                let sf = match c.sample_format() {
+                    SampleFormat::F32 => RSample::F32,
+                    SampleFormat::I16 => RSample::I16,
+                    _ => RSample::F32,
+                };
+                AudioFormat::new(cfg.sample_rate, cfg.channels, sf)
+            });
+            out.push(DeviceInfo {
+                id: id.to_string(),
+                name,
+                default_format,
+            });
+        }
+        Ok(out)
+    }
+
+    fn list_output_devices(&self) -> Result<Vec<DeviceInfo>> {
+        let mut out = Vec::new();
+        let outputs = self
+            .host
+            .output_devices()
+            .map_err(|e| RecordingError::Device(format!("enumerating output devices: {e}")))?
+            .collect::<Vec<_>>();
+        for device in outputs {
+            let id = device
+                .id()
+                .map_err(|e| RecordingError::Device(format!("device id: {e}")))?;
+            let desc = device
+                .description()
+                .map_err(|e| RecordingError::Device(format!("device description: {e}")))?;
+            let name = desc.name().to_string();
+            let default_format = device.default_output_config().ok().map(|c| {
                 let cfg = c.config();
                 let sf = match c.sample_format() {
                     SampleFormat::F32 => RSample::F32,
@@ -178,6 +239,79 @@ impl AudioHost for MacosHost {
         let join = std::thread::spawn(move || {
             if let Err(e) = stream.play() {
                 tracing::error!("cpal play stream: {e}");
+                return;
+            }
+            let _ = stop_rx.recv();
+            let _ = stream.pause();
+        });
+
+        Ok(StreamHandle::new(move || {
+            let _ = stop_tx.send(());
+            let _ = join.join();
+        }))
+    }
+
+    fn start_output_stream(
+        &self,
+        device_id: Option<&str>,
+        format: AudioFormat,
+        fill: Arc<dyn Fn(&mut [f32]) + Send + Sync>,
+    ) -> Result<StreamHandle> {
+        let device = self.resolve_output_device(device_id)?;
+        let def = device
+            .default_output_config()
+            .map_err(|e| RecordingError::Device(format!("default output config: {e}")))?;
+        let cfg: StreamConfig = def.config();
+        if cfg.channels != format.channels {
+            return Err(RecordingError::Device(format!(
+                "output device has {} channels; session requested {}",
+                cfg.channels, format.channels
+            )));
+        }
+        if cfg.sample_rate != format.sample_rate_hz {
+            return Err(RecordingError::Device(format!(
+                "output device runs at {} Hz; session requested {} Hz",
+                cfg.sample_rate, format.sample_rate_hz
+            )));
+        }
+
+        let fill_f32 = fill.clone();
+        let stream = match def.sample_format() {
+            SampleFormat::F32 => device.build_output_stream(
+                &cfg,
+                move |data: &mut [f32], _| {
+                    fill_f32(data);
+                },
+                |e| tracing::error!("cpal output stream error: {e:?}"),
+                None,
+            ),
+            SampleFormat::I16 => {
+                let fill_i16 = fill.clone();
+                device.build_output_stream(
+                    &cfg,
+                    move |data: &mut [i16], _| {
+                        let mut temp = vec![0.0f32; data.len()];
+                        fill_i16(&mut temp);
+                        for (dst, sample) in data.iter_mut().zip(temp.into_iter()) {
+                            *dst = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                        }
+                    },
+                    |e| tracing::error!("cpal output stream error: {e:?}"),
+                    None,
+                )
+            }
+            other => {
+                return Err(RecordingError::Device(format!(
+                    "unsupported output sample format: {other:?}"
+                )));
+            }
+        }
+        .map_err(|e| RecordingError::Device(format!("build_output_stream: {e}")))?;
+
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let join = std::thread::spawn(move || {
+            if let Err(e) = stream.play() {
+                tracing::error!("cpal output play stream: {e}");
                 return;
             }
             let _ = stop_rx.recv();
